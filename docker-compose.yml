@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  reat-env:
+    build: .
+    container_name: reat-container
+    shm_size: '16g'
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - .:/app
+      - tailscale_data:/var/lib/tailscale # Saves your Tailscale login state
+
+volumes:
+  tailscale_data:
