@@ -24,3 +24,10 @@ utils/__pycache__
 .vscode/
 notebooks/
 refactor_plans/
+evaluation/__pycache__
+models/__pycache__
+preprocessing/__pycache__
+.vscode
+__pycache__/
+*.pyc
+.vscode/
