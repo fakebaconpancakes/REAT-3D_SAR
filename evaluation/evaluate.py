@@ -1,132 +1,186 @@
-import os
 import torch
 import torch.nn as nn
-import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import wandb # <-- Added WandB
+import wandb
 
 from models.spatial_gcn import Spatial_GCN_Layer
 from models.temporal_brain import Temporal_Brain_Layer
 from utils.dataset import NTUSkeletonDataset
-from utils.xai_extractor import extract_xai_red_dots
 
-# 0. INITIALIZE WANDB
-wandb.init(
-    project="HAR-REAT",
-    name="EVAL-2-STREAM-FUSION", 
-    config={
-        "architecture": "Late Fusion (9-Ch Kinematic + 3-Ch Structural)",
-        "dataset": "NTU-RGB+D X-View (Pure Test Set)",
-        "batch_size": 16
-    }
-)
-
-# 1. HARDWARE
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Device in-use: {device.type.upper()}")
-
-# 2. INITIALIZATION
-VAL_DIR = 'data/xview/test_skeletons' # <-- Updated to isolated Test Set
+# Fixed two-stream test evaluation.
+DATASET_PREFIX = 'xsub120'
+TEST_DIR = f'data/{DATASET_PREFIX}/test_skeletons'
+NUM_CLASSES = 120
 BATCH_SIZE = 16
-NUM_CLASSES = 60
+FUSION_WEIGHTS = {
+    'JBV': 0.5,
+    'B': 0.5,
+}
 
-print("Loading Data..")
-# The dataset returns the full 9-channel tensor
-val_dataset = NTUSkeletonDataset(data_folder=VAL_DIR, max_frames=100, is_train=False)
-val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True)
 
-print("Loading Dual-Stream Architecture...")
-# ==========================================
-# STREAM A: THE KINEMATIC EXPERT (9 Channels)
-# ==========================================
-gcn_k = Spatial_GCN_Layer(in_channels=9, out_channels=128).to(device)
-transformer_k = Temporal_Brain_Layer(embed_dim=128, num_heads=4, max_frames=100, max_bodies=2).to(device)
-classifier_k = nn.Linear(128, NUM_CLASSES).to(device)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-gcn_k.load_state_dict(torch.load('saved_weights/joints/best_gcn.pth', map_location=device, weights_only=True))
-transformer_k.load_state_dict(torch.load('saved_weights/joints/best_transformer.pth', map_location=device, weights_only=True))
-classifier_k.load_state_dict(torch.load('saved_weights/joints/best_classifier.pth', map_location=device, weights_only=True))
-global_node_k = transformer_k.global_node 
 
-gcn_k.eval()
-transformer_k.eval()
-classifier_k.eval()
+def load_brain(in_channels, folder_path):
+    gcn = Spatial_GCN_Layer(in_channels=in_channels, out_channels=128).to(device)
+    transformer = Temporal_Brain_Layer(
+        embed_dim=128,
+        num_heads=4,
+        max_frames=100,
+        max_bodies=2,
+    ).to(device)
+    classifier = nn.Linear(128, NUM_CLASSES).to(device)
 
-# ==========================================
-# STREAM B: THE STRUCTURAL EXPERT (3 Channels)
-# ==========================================
-gcn_b = Spatial_GCN_Layer(in_channels=3, out_channels=128).to(device)
-transformer_b = Temporal_Brain_Layer(embed_dim=128, num_heads=4, max_frames=100, max_bodies=2).to(device)
-classifier_b = nn.Linear(128, NUM_CLASSES).to(device)
+    gcn.load_state_dict(torch.load(
+        f'{folder_path}/best_gcn.pth',
+        map_location=device,
+        weights_only=True,
+    ))
+    transformer.load_state_dict(torch.load(
+        f'{folder_path}/best_transformer.pth',
+        map_location=device,
+        weights_only=True,
+    ))
+    classifier.load_state_dict(torch.load(
+        f'{folder_path}/best_classifier.pth',
+        map_location=device,
+        weights_only=True,
+    ))
 
-gcn_b.load_state_dict(torch.load('saved_weights/bones/best_gcn.pth', map_location=device, weights_only=True))
-transformer_b.load_state_dict(torch.load('saved_weights/bones/best_transformer.pth', map_location=device, weights_only=True))
-classifier_b.load_state_dict(torch.load('saved_weights/bones/best_classifier.pth', map_location=device, weights_only=True))
-global_node_b = transformer_b.global_node 
+    gcn.eval()
+    transformer.eval()
+    classifier.eval()
+    return gcn, transformer, classifier
 
-gcn_b.eval()
-transformer_b.eval()
-classifier_b.eval()
 
-# 4. Evaluation Loop
-print("Running 2-Stream Ensemble Evaluation..")
+def main():
+    wandb.init(
+        project='HAR-REAT',
+        name='EVAL-2-STREAM-FUSION',
+        config={
+            'architecture': 'Late Fusion (9-Ch Kinematic + 3-Ch Structural)',
+            'dataset': 'NTU-RGB+D 120 X-Subject Test Set',
+            'batch_size': BATCH_SIZE,
+            'fusion_weights': FUSION_WEIGHTS,
+        },
+    )
 
-total_samples = 0
-correct_predictions = 0
+    print(f'Device in-use: {device.type.upper()}')
+    print('Loading test data...')
+    test_dataset = NTUSkeletonDataset(
+        data_folder=TEST_DIR,
+        max_frames=100,
+        is_train=False,
+    )
+    test_dataloader = DataLoader(
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True,
+    )
 
-loop = tqdm(val_dataloader, total=len(val_dataloader), leave=True, desc="Evaluating")
-with torch.no_grad():
-    for batch_idx, (batched_data, body_mask, labels) in enumerate(loop):
-        batched_data = batched_data.to(device)
-        body_mask = body_mask.to(device)
-        labels = labels.to(device)
+    print('Loading two-stream architecture...')
+    experts = {
+        'JBV': load_brain(9, f'saved_weights/weights_{DATASET_PREFIX}/jbv'),
+        'B': load_brain(3, f'saved_weights/weights_{DATASET_PREFIX}/bones'),
+    }
 
-        B, M, T, V, C = batched_data.shape
-        
-        # --- A. KINEMATIC STREAM (Uses all 9 channels) ---
-        input_k = batched_data.reshape(B * M, T, V, C)
-        feat_k = gcn_k(input_k)
-        frames = feat_k.shape[1]
-        t_input_k = torch.cat([feat_k, global_node_k.expand(B*M, frames, 1, 128)], dim=2)
-        vid_rep_k = transformer_k(t_input_k, B, M, body_mask=body_mask)
-        logits_k = classifier_k(vid_rep_k)
-        probs_k = torch.softmax(logits_k, dim=1) 
-        
-        # --- B. STRUCTURAL STREAM (Slices out only channels 3, 4, and 5: The Bones!) ---
-        bone_data = batched_data[:, :, :, :, 3:6]
-        input_b = bone_data.reshape(B * M, T, V, 3)
-        feat_b = gcn_b(input_b)
-        t_input_b = torch.cat([feat_b, global_node_b.expand(B*M, frames, 1, 128)], dim=2)
-        vid_rep_b = transformer_b(t_input_b, B, M, body_mask=body_mask)
-        logits_b = classifier_b(vid_rep_b)
-        probs_b = torch.softmax(logits_b, dim=1) 
-        
-        # --- C. HYBRID LATE FUSION ---
-        fused_probs = (0.5 * probs_k) + (0.5 * probs_b)
-        
-        _, predicted_classes = torch.max(fused_probs, 1)
-        predicted_classes = predicted_classes.view(-1)
-        labels = labels.long().view(-1) 
-        
-        correct_predictions += torch.eq(predicted_classes, labels).sum().item()
-        total_samples += labels.size(0)
+    total_samples = 0
+    correct_predictions = 0
 
-        current_acc = (correct_predictions / total_samples) * 100
-        loop.set_postfix(acc=f"{current_acc:.2f}%")
-        
-        # Log the running accuracy to WandB
-        wandb.log({"Running Accuracy (%)": current_acc})
+    print('Running fixed two-stream ensemble evaluation...')
+    loop = tqdm(
+        test_dataloader,
+        total=len(test_dataloader),
+        leave=True,
+        desc='Evaluating',
+    )
 
-# 5. Final Report
-accuracy = (correct_predictions / total_samples) * 100
+    with torch.no_grad():
+        for batched_data, body_mask, labels in loop:
+            batched_data = batched_data.to(device)
+            body_mask = body_mask.to(device)
+            labels = labels.to(device).long().view(-1)
 
-# Log final metrics to WandB
-wandb.log({"Final Ensemble Accuracy (%)": accuracy, "Total Unseen Videos": total_samples})
-wandb.finish()
+            batch_size, bodies, frames, joints, channels = batched_data.shape
+            stream_inputs = {
+                'JBV': batched_data,
+                'B': batched_data[:, :, :, :, 3:6],
+            }
+            fused_probs = torch.zeros(
+                batch_size,
+                NUM_CLASSES,
+                device=device,
+            )
 
-print("\n" + "=" * 50)
-print("🏆 2-STREAM ENSEMBLE EVALUATION COMPLETE 🏆")
-print(f"Total Unseen Videos Processed: {total_samples}")
-print(f"Final Top-1 Accuracy:          {accuracy:.2f}%")
-print("=" * 50)
+            for stream_name, stream_input in stream_inputs.items():
+                gcn, transformer, classifier = experts[stream_name]
+                input_data = stream_input.reshape(
+                    batch_size,
+                    bodies,
+                    frames,
+                    joints,
+                    stream_input.shape[-1],
+                )
+                input_data = input_data.reshape(
+                    batch_size * bodies,
+                    frames,
+                    joints,
+                    stream_input.shape[-1],
+                )
+
+                features = gcn(input_data)
+                feature_frames = features.shape[1]
+                transformer_input = torch.cat(
+                    [
+                        features,
+                        transformer.global_node.expand(
+                            batch_size * bodies,
+                            feature_frames,
+                            1,
+                            128,
+                        ),
+                    ],
+                    dim=2,
+                )
+                video_representation = transformer(
+                    transformer_input,
+                    batch_size,
+                    bodies,
+                    body_mask=body_mask,
+                )
+                probabilities = torch.softmax(
+                    classifier(video_representation),
+                    dim=1,
+                )
+                fused_probs += FUSION_WEIGHTS[stream_name] * probabilities
+
+            predicted_classes = torch.argmax(fused_probs, dim=1)
+            correct_predictions += torch.eq(
+                predicted_classes,
+                labels,
+            ).sum().item()
+            total_samples += labels.size(0)
+
+            current_accuracy = (correct_predictions / total_samples) * 100
+            loop.set_postfix(acc=f'{current_accuracy:.2f}%')
+            wandb.log({'Running Accuracy (%)': current_accuracy})
+
+    accuracy = (correct_predictions / total_samples) * 100
+    wandb.log({
+        'Final Ensemble Accuracy (%)': accuracy,
+        'Total Unseen Videos': total_samples,
+    })
+    wandb.finish()
+
+    print('\n' + '=' * 50)
+    print('2-STREAM ENSEMBLE EVALUATION COMPLETE')
+    print(f'Total Unseen Videos Processed: {total_samples}')
+    print(f'Final Top-1 Accuracy:          {accuracy:.2f}%')
+    print('=' * 50)
+
+
+if __name__ == '__main__':
+    main()
