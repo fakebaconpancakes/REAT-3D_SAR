@@ -12,19 +12,21 @@ from models.temporal_brain import Temporal_Brain_Layer
 
 
 class REAT_Model(nn.Module):
-    def __init__(self):
+    def __init__(self, in_channels=9): # <-- Added dynamic channel arg
         super().__init__()
-        self.gcn = Spatial_GCN_Layer(in_channels=9, out_channels=64)
-        self.transformer = Temporal_Brain_Layer(embed_dim=64, num_heads=4, max_frames=100)
+        self.gcn = Spatial_GCN_Layer(in_channels=in_channels, out_channels=128)
+        self.transformer = Temporal_Brain_Layer(embed_dim=128, num_heads=4, max_frames=100, max_bodies=2)
 
     def forward(self, x):
-        # x shape: (Batch, Time, Bodies, Joints, Channels)
-        B, T, M, V, C = x.shape
-        gcn_input = x.permute(0, 2, 1, 3, 4).reshape(-1, T, V, C)
+        B, M, T, V, C = x.shape
+        gcn_input = x.reshape(B * M, T, V, C)
         gcn_features = self.gcn(gcn_input)
-        global_node = self.transformer.global_node.expand(B * M, T, 1, 64)
-        transformer_input = torch.cat([gcn_features, global_node], dim=2)
-        return self.transformer(transformer_input)
+        
+        frames = gcn_features.shape[1]
+        global_node_expanded = self.transformer.global_node.expand(B * M, frames, 1, 128)
+        transformer_input = torch.cat([gcn_features, global_node_expanded], dim=2)
+        
+        return self.transformer(transformer_input, B, M)
 
 
 def count_trainable_params(model):
@@ -55,18 +57,16 @@ def _spatial_mask_pairs(room_map, global_idx):
 
 
 def estimate_reat_macs(model, x_shape):
-    # x_shape: (B, T, M, V, C)
-    B, T, M, V, C = x_shape
+    B, M, T, V, C = x_shape
     E = model.transformer.embed_dim
     H = model.transformer.num_heads
-    S = V + 1  # 25 joints + 1 global node
+    S = V + 1  
     d = E // H
     B_M = B * M
 
     # ---- Spatial GCN ----
     tokens_gcn = B_M * T * V
     macs_gcn_linear = _linear_macs(tokens_gcn, C, E)
-    # einsum('btjc,jk->btkc'): for each output (b,t,k,c) sum over j in V
     macs_gcn_einsum = B_M * T * V * E * V
 
     # ---- Temporal Brain / Spatial block ----
@@ -76,18 +76,20 @@ def estimate_reat_macs(model, x_shape):
     mask_pairs_per_frame_head = _spatial_mask_pairs(
         model.transformer.room_map, model.transformer.global_node_idx
     )
-    # QK^T + Attn*V under the sparse anatomical mask
     macs_spatial_attn = B_M * T * H * mask_pairs_per_frame_head * (2 * d)
 
     macs_spatial_out = _linear_macs(tokens_spatial, E, E)
     macs_spatial_ffn = _ffn_macs(tokens_spatial, E, expansion=4)
 
     # ---- Temporal block ----
-    L = T + 1  # +1 for video token
-    tokens_temporal = B_M * L
+    L = (M * T) + 1  
+    tokens_temporal = B * L 
+    
     macs_temporal_qkv = _linear_macs(tokens_temporal, E, 3 * E)
+    
     dense_pairs = L * L
-    macs_temporal_attn = B_M * H * dense_pairs * (2 * d)
+    macs_temporal_attn = B * H * dense_pairs * (2 * d)
+    
     macs_temporal_out = _linear_macs(tokens_temporal, E, E)
     macs_temporal_ffn = _ffn_macs(tokens_temporal, E, expansion=4)
 
@@ -123,45 +125,56 @@ def estimate_reat_macs(model, x_shape):
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Building REAT Profiler on {device}...")
-    model = REAT_Model().to(device)
+    print(f"Building Multi-Stream REAT Profiler on {device}...\n")
 
-    # (Batch=1, Time=100, Bodies=2, Joints=25, Channels=9)
-    input_shape = (1, 100, 2, 25, 9)
-    dummy_input = torch.randn(*input_shape).to(device)
+    # 1. Profile the 9-Channel JBV Expert
+    model_9ch = REAT_Model(in_channels=9).to(device)
+    macs_9ch = estimate_reat_macs(model_9ch, (1, 2, 100, 25, 9))["total"]
+    params_9ch = count_trainable_params(model_9ch)
 
-    print("Calculating analytic MACs and exact trainable parameters...")
-    analytic = estimate_reat_macs(model, input_shape)
-    exact_params = count_trainable_params(model)
+    # 2. Profile the 3-Channel Pure Expert (Bones, Joints, Velocity)
+    model_3ch = REAT_Model(in_channels=3).to(device)
+    macs_3ch = estimate_reat_macs(model_3ch, (1, 2, 100, 25, 3))["total"]
+    params_3ch = count_trainable_params(model_3ch)
 
-    print("\n" + "=" * 60)
-    print("REAT Architecture Complexity Report (Analytic)")
-    print("=" * 60)
-    print(f"Trainable Parameters (exact): {exact_params:,}")
-    print(f"Total MACs (analytic):        {analytic['total']:,}")
-    print(f"Estimated FLOPs (~2*MACs):    {2 * analytic['total']:,}")
-    print("=" * 60)
-    print("MAC breakdown:")
-    for name, value in analytic["breakdown"].items():
-        print(f"  - {name:25s}: {value:,}")
+    # 3. Define the Ensemble Compositions
+    ensembles = {
+        "JBV":               {"9ch": 1, "3ch": 0},
+        "JBV : V":           {"9ch": 1, "3ch": 1},
+        "JBV : J":           {"9ch": 1, "3ch": 1},
+        "JBV : J : V":       {"9ch": 1, "3ch": 2},
+        "JBV : B : V":       {"9ch": 1, "3ch": 2},
+        "JBV : B : J : V":   {"9ch": 1, "3ch": 3},
+    }
 
+    print("=" * 70)
+    print("  REAT ENSEMBLE COMPLEXITY REPORT (Analytic) ")
+    print("=" * 70)
+    print(f"{'Ensemble Type':<25} | {'Total Params':<15} | {'Total MACs (FLOPs/2)'}")
+    print("-" * 70)
+
+    # 4. Calculate and display aggregated totals
+    for name, config in ensembles.items():
+        total_params = (config["9ch"] * params_9ch) + (config["3ch"] * params_3ch)
+        total_macs = (config["9ch"] * macs_9ch) + (config["3ch"] * macs_3ch)
+        print(f"{name:<25} | {total_params:<15,} | {total_macs:,}")
+    
+    print("=" * 70)
+
+    # THOP cross-check for just the 9-channel base model to ensure alignment
     if profile is not None and clever_format is not None:
-        print("\nCalculating THOP result for comparison...")
-        thop_macs, thop_params = profile(model, inputs=(dummy_input,), verbose=False)
+        print("\nCalculating THOP result for 9-Channel Base Model...")
+        dummy_input = torch.randn(1, 2, 100, 25, 9).to(device)
+        thop_macs, thop_params = profile(model_9ch, inputs=(dummy_input,), verbose=False)
         thop_macs_str, thop_params_str = clever_format([thop_macs, thop_params], "%.3f")
-        delta = analytic["total"] - thop_macs
-        delta_pct = (delta / analytic["total"]) * 100 if analytic["total"] else 0.0
+        delta = macs_9ch - thop_macs
+        delta_pct = (delta / macs_9ch) * 100 if macs_9ch else 0.0
 
-        print("\n" + "=" * 60)
-        print("THOP Cross-check")
-        print("=" * 60)
-        print(f"THOP Parameters:            {thop_params_str}")
-        print(f"THOP MACs:                  {thop_macs_str}")
-        print(f"Analytic - THOP (raw MACs): {int(delta):,} ({delta_pct:.2f}%)")
-        print("=" * 60)
-        print("*THOP may undercount custom kernels (einsum/flex_attention).")
-    else:
-        print("\nTHOP is not installed; skipped THOP cross-check.")
+        print("\n" + "-" * 70)
+        print(f"THOP Parameters (9ch):      {thop_params_str}")
+        print(f"THOP MACs (9ch):            {thop_macs_str}")
+        print(f"Analytic vs THOP Discrepancy: {int(delta):,} ({delta_pct:.2f}%)")
+        print("-" * 70)
 
 
 if __name__ == "__main__":

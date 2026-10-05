@@ -2,6 +2,29 @@ import os
 import torch
 import numpy as np
 from torch.utils.data import Dataset
+import math
+
+def random_y_rotation(skeleton_tensor, max_degrees=15):
+    """
+    Applies a random Y-axis (vertical) rotation to the entire skeleton.
+    Input shape: (Time, Bodies, Joints, 3)
+    """
+    # 1. Pick a random angle between -max_degrees and +max_degrees
+    angle = math.radians(np.random.uniform(-max_degrees, max_degrees))
+    
+    # 2. Build the 3D Rotation Matrix for the Y-axis (Kinect's vertical axis)
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    rot_matrix = np.array([
+        [cos_a,  0, sin_a],
+        [0,      1, 0    ],
+        [-sin_a, 0, cos_a]
+    ], dtype=np.float32)
+    
+    # 3. Apply the rotation to the XYZ coordinates
+    # skeleton_tensor is shape (T, M, V, 3). Matrix mutiplication on the last dim.
+    rotated_skeleton = np.dot(skeleton_tensor, rot_matrix.T)
+    return rotated_skeleton
 
 def engineer_physics_features(skeleton_tensor):
     """
@@ -16,6 +39,19 @@ def engineer_physics_features(skeleton_tensor):
     # This completely destroys the network's ability to memorize room locations!
     root_joint = skeleton_tensor[:, :, 0:1, :].clone() # Extract spine coords
     skeleton_tensor = skeleton_tensor - root_joint     # Subtract from all 25 joints
+
+    # --- NEW: SKELETON-HEIGHT NORMALIZATION (For X-Sub) ---
+    # Joint 20 is Spine-Shoulder, Joint 0 is Spine-Base
+    spine_shoulder = skeleton_tensor[:, :, 20:21, :]
+    spine_base = skeleton_tensor[:, :, 0:1, :]
+    
+    # Calculate height of the spine (L2 Norm)
+    spine_height = torch.norm(spine_shoulder - spine_base, dim=-1, keepdim=True)
+    # Add epsilon to prevent divide-by-zero
+    spine_height = torch.clamp(spine_height, min=1e-5)
+    
+    # Divide all coordinates by the spine height
+    skeleton_tensor = skeleton_tensor / spine_height
     # ------------------------------------
 
     T, M, V, C = skeleton_tensor.shape
@@ -35,13 +71,17 @@ def engineer_physics_features(skeleton_tensor):
     # Stack: Relative (3) + Bones (3) + Velocity (3) = 9 Channels
     engineered_tensor = torch.cat([skeleton_tensor, bones, velocity], dim=-1)
 
-    return engineered_tensor
+    # return skeleton_tensor # pure_joints Pipeline
+    # return bones # bones Pipeline
+    # return velocity # pure_velocity pipeline
+    return engineered_tensor # JBV Pipeline
 
 class NTUSkeletonDataset(Dataset):
-    def __init__(self, data_folder, max_frames=100):
+    def __init__(self, data_folder, max_frames=100, is_train=False):
         self.data_folder = os.path.join(data_folder, 'binary_pt') 
         self.file_list = sorted([f for f in os.listdir(self.data_folder) if f.endswith('.pt')])
         self.max_frames = max_frames
+        self.is_train = is_train
 
     def __len__(self):
         return len(self.file_list)
@@ -94,7 +134,24 @@ class NTUSkeletonDataset(Dataset):
         else:
             standardized_tensor = raw_numpy[:self.max_frames, :, :, :]
 
+        if self.is_train:
+            standardized_tensor = random_y_rotation(standardized_tensor, max_degrees=17)
+
         tensor_data = torch.tensor(standardized_tensor, dtype=torch.float32)
         engineered_data = engineer_physics_features(tensor_data)
 
-        return engineered_data, torch.tensor(action_label, dtype=torch.long)
+        # Decoupled Body
+
+        # 1. Permute to (Bodies, Time, Joints, Channels)
+        engineered_data = engineered_data.permute(1, 0, 2, 3) # (Bodies=2, Time=100, Joints=25, Channels=9)
+
+        # 2. Ghost Mask for Temporal Transformer
+        M  = engineered_data.shape[0]
+        body_mask = torch.ones(M, dtype=torch.bool)
+
+        for m in range(M):
+            # if the body has any kinetic variance mark it as False (not ghost)
+            if torch.sum(torch.abs(engineered_data[m])) > 1e-4:
+                body_mask[m] = False
+
+        return engineered_data, body_mask, torch.tensor(action_label, dtype=torch.long)

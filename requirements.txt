@@ -20,3 +20,4 @@ thop            # FLOPs/MACs profiler for complexity_profiler.py
 triton          # Triton GPU kernels (bundled with CUDA torch, listed for explicitness)
 plotly
 pandas
+wandb

@@ -3,9 +3,11 @@ FROM python:3.11-slim-bookworm
 WORKDIR /app
 
 # Install system dependencies, SSH server, curl, and iptables (required for Tailscale)
+# Install system dependencies, SSH server, curl, iptables, AND build-essential (for Triton C++ compiling)
 RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     libglib2.0-0 libsm6 libxext6 libxrender-dev \
     openssh-server curl iptables \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Configure SSH so you can log in via VS Code
@@ -18,9 +20,12 @@ RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/
 RUN curl -fsSL https://tailscale.com/install.sh | sh
 
 # Install PyTorch and Python dependencies
-RUN pip install --no-cache-dir torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Pull the absolute latest cutting-edge PyTorch build to support RTX 5090 (sm_120)
+RUN pip install --pre --no-cache-dir torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/nightly/cu132
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install wandb
 
 # Copy project files
 COPY . .

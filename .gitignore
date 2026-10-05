@@ -13,3 +13,13 @@ build_dashboard_data.py
 evaluate.py
 visualization_gif.py
 docs/
+docker/
+docker-compose.yml
+Dockerfile
+output.log
+wandb/
+__pycache__/
+*.pyc
+utils/__pycache__
+.vscode/
+notebooks/
