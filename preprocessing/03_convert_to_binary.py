@@ -28,12 +28,12 @@ def parse_single_skeleton(file_path):
                 continue
 
             for body in range(bodycount):
-                cursor += 2 # skip kinect metadata
+                cursor += 2
                 njoints_in_file = int(datas[cursor].strip())
 
                 for joint in range(njoints_in_file):
                     cursor += 1
-                    if body < 2: # We only care about the first 2 bodies (Person A and Person B)
+                    if body < 2:
                         joininfo = datas[cursor].strip().split()
                         skeleton_tensor[frame, body, joint, :] = [
                             float(joininfo[0]), float(joininfo[1]), float(joininfo[2])
@@ -50,14 +50,12 @@ def process_file(args):
     """
     source_path, target_path = args
     
-    # Smart resume: skip if already converted
     if os.path.exists(target_path):
         return True
         
     parsed_data = parse_single_skeleton(source_path)
     
     if parsed_data is not None:
-        # Convert to PyTorch tensor and save natively
         tensor_data = torch.tensor(parsed_data, dtype=torch.float32)
         torch.save(tensor_data, target_path)
         return True
@@ -67,30 +65,26 @@ def convert_directory(data_dir):
     """
     Organizes loose files into 'raw_text', then converts them to 'binary_pt'.
     """
-    print(f"\n📂 Processing directory: {data_dir}")
-    
-    # 1. Create the dual-folder structure
+    print(f"\nProcessing directory: {data_dir}")
+
     raw_dir = os.path.join(data_dir, 'raw_text')
     binary_dir = os.path.join(data_dir, 'binary_pt')
     os.makedirs(raw_dir, exist_ok=True)
     os.makedirs(binary_dir, exist_ok=True)
     
-    # 2. Sweep any loose .skeleton files into raw_text
     loose_files = [f for f in os.listdir(data_dir) if f.endswith('.skeleton')]
     if loose_files:
-        print(f"🧹 Moving {len(loose_files)} loose files into 'raw_text' folder...")
+        print(f"Moving {len(loose_files)} loose files into 'raw_text' folder...")
         for f in loose_files:
             shutil.move(os.path.join(data_dir, f), os.path.join(raw_dir, f))
             
-    # 3. Gather all files from the raw_text folder
     file_list = [f for f in os.listdir(raw_dir) if f.endswith('.skeleton')]
     total_files = len(file_list)
     
     if total_files == 0:
-        print(f"⚠️ No .skeleton files found in {raw_dir}")
+        print(f"No .skeleton files found in {raw_dir}")
         return
 
-    # 4. Prepare arguments for the CPU workers
     tasks = []
     for filename in file_list:
         source_path = os.path.join(raw_dir, filename)
@@ -98,11 +92,9 @@ def convert_directory(data_dir):
         target_path = os.path.join(binary_dir, target_filename)
         tasks.append((source_path, target_path))
 
-    # 5. Run in parallel using CPU cores
     print(f"⚙️  Converting {total_files} files to binary .pt format...")
     success_count = 0
     
-    # Use max workers available on the system
     with ProcessPoolExecutor() as executor:
         futures = [executor.submit(process_file, task) for task in tasks]
         
@@ -110,12 +102,12 @@ def convert_directory(data_dir):
             if future.result():
                 success_count += 1
                 
-    print(f"✅ Successfully converted {success_count}/{total_files} files in {data_dir}")
+    print(f"Successfully converted {success_count}/{total_files} files in {data_dir}")
 
 if __name__ == '__main__':
-    print("🚀 Starting NTU-RGBD 120 Data Organization & Binary PT Conversion...")
+    print("Starting NTU-RGBD 120 Data Organization & Binary PT Conversion...")
     
-    # The 6 benchmark folders (X-SUB and X-SET, including Test folders)
+    # Modify the directories below if you have a different structure or additional datasets
     directories_to_process = [
         "data/xsub120/train_skeletons",
         "data/xsub120/val_skeletons",
@@ -129,6 +121,6 @@ if __name__ == '__main__':
         if os.path.exists(directory):
             convert_directory(directory)
         else:
-            print(f"\n⏭️  Skipping {directory} (Folder does not exist yet)")
+            print(f"\nSkipping {directory} (Folder does not exist yet)")
             
-    print("\n🎉 All Organization and Conversions Complete!")
+    print("\nAll Organization and Conversions Complete!")

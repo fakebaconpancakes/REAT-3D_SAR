@@ -7,11 +7,18 @@ import wandb
 from models.spatial_gcn import Spatial_GCN_Layer
 from models.temporal_brain import Temporal_Brain_Layer
 from utils.dataset import NTUSkeletonDataset
+from utils.pipeline_config import (
+    checkpoint_directory,
+    dataset_num_classes,
+    dataset_split_path,
+    select_pipeline_input,
+)
 
 # Fixed two-stream test evaluation.
-DATASET_PREFIX = 'xsub120'
-TEST_DIR = f'data/{DATASET_PREFIX}/test_skeletons'
-NUM_CLASSES = 120
+DATASET_NAME = 'xsub120'
+RUN_ID = 'run17'
+TEST_DIR = dataset_split_path(DATASET_NAME, 'test')
+NUM_CLASSES = dataset_num_classes(DATASET_NAME)
 BATCH_SIZE = 16
 FUSION_WEIGHTS = {
     'JBV': 0.5,
@@ -71,7 +78,6 @@ def main():
     test_dataset = NTUSkeletonDataset(
         data_folder=TEST_DIR,
         max_frames=100,
-        is_train=False,
     )
     test_dataloader = DataLoader(
         test_dataset,
@@ -83,8 +89,14 @@ def main():
 
     print('Loading two-stream architecture...')
     experts = {
-        'JBV': load_brain(9, f'saved_weights/weights_{DATASET_PREFIX}/jbv'),
-        'B': load_brain(3, f'saved_weights/weights_{DATASET_PREFIX}/bones'),
+        'JBV': load_brain(
+            9,
+            checkpoint_directory(DATASET_NAME, RUN_ID, 'jbv'),
+        ),
+        'B': load_brain(
+            3,
+            checkpoint_directory(DATASET_NAME, RUN_ID, 'bones'),
+        ),
     }
 
     total_samples = 0
@@ -106,8 +118,8 @@ def main():
 
             batch_size, bodies, frames, joints, channels = batched_data.shape
             stream_inputs = {
-                'JBV': batched_data,
-                'B': batched_data[:, :, :, :, 3:6],
+                'JBV': select_pipeline_input(batched_data, 'jbv'),
+                'B': select_pipeline_input(batched_data, 'bones'),
             }
             fused_probs = torch.zeros(
                 batch_size,

@@ -1,17 +1,23 @@
 import os
+import json
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from utils.dataset import NTUSkeletonDataset
+from utils.pipeline_config import dataset_split_path, result_directory
 
 # ==========================================
 # 0. CONFIGURATION
 # ==========================================
 CURRENT_DATASET = 'X-VIEW'    
 CURRENT_ENSEMBLE = '2-stream' # Change this to test different pipelines!
+DATASET_NAME = 'xview'
+RUN_ID = 'run17'
 
-DATA_PREFIX = CURRENT_DATASET.lower().replace('-', '')
-NPY_DIR = f"results/{DATA_PREFIX}-run17/{CURRENT_ENSEMBLE}/xai_npy"
+RESULT_DIR = result_directory(DATASET_NAME, RUN_ID, CURRENT_ENSEMBLE)
+NPY_DIR = RESULT_DIR / "xai_npy"
+SEMANTIC_DIR = RESULT_DIR / "semantic"
+SEMANTIC_DIR.mkdir(parents=True, exist_ok=True)
 
 # Kinect V2 Joint Mapping (0-indexed)
 # 0-SpineBase, 1-SpineMid, 2-Neck, 3-Head, 
@@ -71,7 +77,10 @@ ACTION_TARGETS = {
 # ==========================================
 # 2. PROVING ENGINE LOOP
 # ==========================================
-dataset = NTUSkeletonDataset(data_folder=f'data/{DATA_PREFIX}/test_skeletons', max_frames=100)
+dataset = NTUSkeletonDataset(
+    data_folder=str(dataset_split_path(DATASET_NAME, 'test')),
+    max_frames=100,
+)
 
 hits = 0
 total_evaluated = 0
@@ -81,7 +90,7 @@ print(f"Running Pointing Game for {CURRENT_ENSEMBLE} on {CURRENT_DATASET}...")
 
 for file_idx in tqdm(range(len(dataset))):
     target_base = dataset.file_list[file_idx].replace('.pt', '')
-    npy_path = os.path.join(NPY_DIR, f"{target_base}_fused.npy")
+    npy_path = NPY_DIR / f"{target_base}_fused.npy"
     
     if not os.path.exists(npy_path):
         continue 
@@ -111,8 +120,10 @@ for file_idx in tqdm(range(len(dataset))):
     total_evaluated += 1
     
     results.append({
-        'file': target_base,
+        'sample_id': target_base,
         'action_idx': label_idx,
+        'action_label': f"class_{label_idx}",
+        'peak_body': int(peak_body),
         'peak_joint': peak_joint,
         'is_hit': is_hit
     })
@@ -129,8 +140,34 @@ if total_evaluated > 0:
     
     # Save the detailed breakdown
     df = pd.DataFrame(results)
-    csv_path = f'results/{DATA_PREFIX}-run17/{CURRENT_ENSEMBLE}_pointing_game.csv'
+    csv_path = SEMANTIC_DIR / "semantic_details.csv"
     df.to_csv(csv_path, index=False)
     print(f"Detailed logs saved to {csv_path}")
 else:
-    print("No heatmaps found! Check your configuration.")
+    accuracy = 0.0
+    csv_path = SEMANTIC_DIR / "semantic_details.csv"
+    pd.DataFrame(
+        columns=[
+            "sample_id",
+            "action_idx",
+            "action_label",
+            "peak_body",
+            "peak_joint",
+            "is_hit",
+        ]
+    ).to_csv(csv_path, index=False)
+    print("No heatmaps found. Check your configuration.")
+
+semantic_result = {
+    "schema_version": 1,
+    "metric": "pointing_game",
+    "dataset": DATASET_NAME,
+    "run_id": RUN_ID,
+    "ensemble": CURRENT_ENSEMBLE,
+    "sample_count": total_evaluated,
+    "hits": hits,
+    "accuracy": accuracy / 100,
+    "details_file": "semantic_details.csv",
+}
+with (SEMANTIC_DIR / "semantic_results.json").open("w", encoding="utf-8") as result_file:
+    json.dump(semantic_result, result_file, indent=2, sort_keys=True)

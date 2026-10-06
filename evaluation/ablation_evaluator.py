@@ -8,15 +8,23 @@ import numpy as np
 from models.spatial_gcn import Spatial_GCN_Layer
 from models.temporal_brain import Temporal_Brain_Layer
 from utils.dataset import NTUSkeletonDataset
+from utils.pipeline_config import (
+    checkpoint_directory,
+    dataset_num_classes,
+    dataset_split_path,
+    select_pipeline_input,
+)
 
 # 1. HARDWARE & INIT
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-TEST_DIR = 'data/xsub120/test_skeletons' 
+DATASET_NAME = 'xsub120'
+RUN_ID = 'run17'
+TEST_DIR = dataset_split_path(DATASET_NAME, 'test')
 BATCH_SIZE = 16
-NUM_CLASSES = 120
+NUM_CLASSES = dataset_num_classes(DATASET_NAME)
 
 print("Loading Test Data..")
-test_dataset = NTUSkeletonDataset(data_folder=TEST_DIR, max_frames=100, is_train=False)
+test_dataset = NTUSkeletonDataset(data_folder=TEST_DIR, max_frames=100)
 test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True)
 
 # 2. HELPER TO LOAD A BRAIN
@@ -33,10 +41,22 @@ def load_brain(in_channels, folder_path):
     return gcn, transformer, classifier
 
 print("Loading All 4 Brains...")
-brain_jbv = load_brain(9, 'saved_weights/weights_xsub120/jbv') # Your original 9-ch run
-brain_b   = load_brain(3, 'saved_weights/weights_xsub120/bones')
-brain_j   = load_brain(3, 'saved_weights/weights_xsub120/pure_joints')
-brain_v   = load_brain(3, 'saved_weights/weights_xsub120/pure_velocity')
+brain_jbv = load_brain(
+    9,
+    checkpoint_directory(DATASET_NAME, RUN_ID, 'jbv'),
+)
+brain_b = load_brain(
+    3,
+    checkpoint_directory(DATASET_NAME, RUN_ID, 'bones'),
+)
+brain_j = load_brain(
+    3,
+    checkpoint_directory(DATASET_NAME, RUN_ID, 'joints'),
+)
+brain_v = load_brain(
+    3,
+    checkpoint_directory(DATASET_NAME, RUN_ID, 'velocity'),
+)
 
 # 3. EXTRACTION LOOP
 all_labels = []
@@ -53,10 +73,10 @@ with torch.no_grad():
         
         # Define the slices
         slices = {
-            'JBV': batched_data,                         # Channels 0-8
-            'J':   batched_data[:, :, :, :, 0:3],        # Channels 0,1,2
-            'B':   batched_data[:, :, :, :, 3:6],        # Channels 3,4,5
-            'V':   batched_data[:, :, :, :, 6:9]         # Channels 6,7,8
+            'JBV': select_pipeline_input(batched_data, 'jbv'),
+            'J': select_pipeline_input(batched_data, 'joints'),
+            'B': select_pipeline_input(batched_data, 'bones'),
+            'V': select_pipeline_input(batched_data, 'velocity'),
         }
         
         brains = {'JBV': brain_jbv, 'B': brain_b, 'J': brain_j, 'V': brain_v}

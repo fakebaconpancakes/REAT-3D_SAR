@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import numpy as np
 import pandas as pd
@@ -8,13 +9,21 @@ import torch.nn as nn
 from models.spatial_gcn import Spatial_GCN_Layer
 from models.temporal_brain import Temporal_Brain_Layer
 from utils.dataset import NTUSkeletonDataset
-from train60 import NUM_CLASSES
+from utils.pipeline_config import (
+    checkpoint_directory,
+    dataset_num_classes,
+    dataset_split_path,
+    result_directory,
+    select_pipeline_input,
+)
 
 # ==========================================
 # 0. CONFIGURATION
 # ==========================================
-CURRENT_DATASET = 'X-VIEW'    
+CURRENT_DATASET = 'XSUB120'
 CURRENT_ENSEMBLE = '2-stream' 
+DATASET_NAME = 'xsub120'
+RUN_ID = 'run17'
 
 THESIS_CONFIGS = {
     'X-VIEW': {
@@ -28,13 +37,28 @@ THESIS_CONFIGS = {
         '2-stream': {'JBV': 0.50, 'B': 0.0,  'J': 0.0,  'V': 0.50},
         '3-stream': {'JBV': 0.35, 'B': 0.35, 'J': 0.0,  'V': 0.30},
         '4-stream': {'JBV': 0.30, 'B': 0.20, 'J': 0.20, 'V': 0.30}
+    },
+    'XSET120': {
+        'pure':     {'JBV': 1.0,  'B': 0.0,  'J': 0.0,  'V': 0.0},
+        '2-stream': {'JBV': 0.55, 'B': 0.0,  'J': 0.0,  'V': 0.45},
+        '3-stream': {'JBV': 0.40, 'B': 0.0,  'J': 0.25, 'V': 0.35},
+        '4-stream': {'JBV': 0.30, 'B': 0.20, 'J': 0.20, 'V': 0.30}
+    },
+    'XSUB120': {
+        'pure':     {'JBV': 1.0,  'B': 0.0,  'J': 0.0,  'V': 0.0},
+        '2-stream': {'JBV': 0.55, 'B': 0.0,  'J': 0.45, 'V': 0.0},
+        '3-stream': {'JBV': 0.35, 'B': 0.0,  'J': 0.30, 'V': 0.35},
+        '4-stream': {'JBV': 0.30, 'B': 0.20, 'J': 0.20, 'V': 0.30}
     }
 }
 
 WEIGHTS = THESIS_CONFIGS[CURRENT_DATASET][CURRENT_ENSEMBLE]
 ACTIVE_STREAMS = [name for name, weight in WEIGHTS.items() if weight > 0.0]
-DATA_PREFIX = CURRENT_DATASET.lower().replace('-', '')
-NPY_DIR = f"results/{DATA_PREFIX}-run17/{CURRENT_ENSEMBLE}/xai_npy"
+NUM_CLASSES = dataset_num_classes(DATASET_NAME)
+RESULT_DIR = result_directory(DATASET_NAME, RUN_ID, CURRENT_ENSEMBLE)
+NPY_DIR = RESULT_DIR / "xai_npy"
+FIDELITY_DIR = RESULT_DIR / "fidelity"
+FIDELITY_DIR.mkdir(parents=True, exist_ok=True)
 
 K_VALUES = [1, 3, 5, 7, 9] # How many joints to delete/insert
 
@@ -48,10 +72,15 @@ def load_expert(in_channels, path):
     trans = Temporal_Brain_Layer(embed_dim=128, num_heads=4, max_frames=100, max_bodies=2).to(device)
     cls = nn.Linear(128, NUM_CLASSES).to(device) 
     
-    base_weight_path = f'saved_weights/weights_{DATA_PREFIX}-run17/{path}'
-    gcn.load_state_dict(torch.load(f'{base_weight_path}/best_gcn.pth', map_location=device, weights_only=True))
-    trans.load_state_dict(torch.load(f'{base_weight_path}/best_transformer.pth', map_location=device, weights_only=True))
-    cls.load_state_dict(torch.load(f'{base_weight_path}/best_classifier.pth', map_location=device, weights_only=True))
+    base_weight_path = checkpoint_directory(DATASET_NAME, RUN_ID, {
+        'jbv': 'jbv',
+        'bones': 'bones',
+        'pure_joints': 'joints',
+        'pure_velocity': 'velocity',
+    }[path])
+    gcn.load_state_dict(torch.load(base_weight_path / 'best_gcn.pth', map_location=device, weights_only=True))
+    trans.load_state_dict(torch.load(base_weight_path / 'best_transformer.pth', map_location=device, weights_only=True))
+    cls.load_state_dict(torch.load(base_weight_path / 'best_classifier.pth', map_location=device, weights_only=True))
     
     gcn.eval(); trans.eval(); cls.eval()
     return gcn, trans, cls
@@ -69,10 +98,10 @@ def get_ensemble_confidence(tensor_input, body_mask, target_label):
     """Runs the 9-channel tensor through the active ensemble and returns confidence of the TRUE label."""
     B, M, T, V, C = tensor_input.shape
     slices = {
-        'JBV': tensor_input,
-        'J':   tensor_input[:, :, :, :, 0:3],
-        'B':   tensor_input[:, :, :, :, 3:6],
-        'V':   tensor_input[:, :, :, :, 6:9]
+        'JBV': select_pipeline_input(tensor_input, 'jbv'),
+        'J': select_pipeline_input(tensor_input, 'joints'),
+        'B': select_pipeline_input(tensor_input, 'bones'),
+        'V': select_pipeline_input(tensor_input, 'velocity'),
     }
     
     fused_probs = torch.zeros(1, NUM_CLASSES).to(device)
@@ -94,13 +123,16 @@ def get_ensemble_confidence(tensor_input, body_mask, target_label):
 # ==========================================
 # 3. PROVING ENGINE LOOP
 # ==========================================
-dataset = NTUSkeletonDataset(data_folder=f'data/{DATA_PREFIX}/test_skeletons', max_frames=100)
+dataset = NTUSkeletonDataset(
+    data_folder=str(dataset_split_path(DATASET_NAME, 'test')),
+    max_frames=100,
+)
 results = []
 
 print(f"Running Proving Engine ({CURRENT_ENSEMBLE} on {CURRENT_DATASET})...")
 for file_idx in tqdm(range(len(dataset))):
     target_base = dataset.file_list[file_idx].replace('.pt', '')
-    npy_path = os.path.join(NPY_DIR, f"{target_base}_fused.npy")
+    npy_path = NPY_DIR / f"{target_base}_fused.npy"
     
     if not os.path.exists(npy_path):
         continue # Only evaluate videos that have XAI heatmaps generated
@@ -117,7 +149,7 @@ for file_idx in tqdm(range(len(dataset))):
     heatmaps = np.load(npy_path) # Shape: (2, 100, 25)
     joint_importance = np.sum(heatmaps, axis=1) # Sum across frames -> (2, 25)
     
-    video_metrics = {'file': target_base, 'base_conf': base_conf}
+    video_metrics = {'sample_id': target_base, 'base_conf': base_conf}
     
     for k in K_VALUES:
         del_tensor = tensor_input.clone()
@@ -151,15 +183,47 @@ for file_idx in tqdm(range(len(dataset))):
 # 4. AGGREGATE AND SAVE
 # ==========================================
 df = pd.DataFrame(results)
+details_path = FIDELITY_DIR / "fidelity_details.csv"
+df.to_csv(details_path, index=False)
 
 # Calculate Area Under Curve (AUC) for Drops
 print("\n=== QUANTITATIVE FAITHFULNESS RESULTS ===")
-print(f"Base Average Confidence: {df['base_conf'].mean():.4f}")
+base_confidence_mean = float(df["base_conf"].mean()) if not df.empty else 0.0
+print(f"Base Average Confidence: {base_confidence_mean:.4f}")
 
+deletion_drop_mean = {}
+insertion_retention_mean = {}
 for k in K_VALUES:
-    del_drop = df['base_conf'].mean() - df[f'del_k{k}'].mean()
-    ins_retention = df[f'ins_k{k}'].mean() / df['base_conf'].mean()
+    del_drop = (
+        base_confidence_mean - float(df[f"del_k{k}"].mean())
+        if not df.empty
+        else 0.0
+    )
+    ins_retention = (
+        float(df[f"ins_k{k}"].mean()) / base_confidence_mean
+        if base_confidence_mean > 0 and not df.empty
+        else 0.0
+    )
+    deletion_drop_mean[str(k)] = del_drop
+    insertion_retention_mean[str(k)] = ins_retention
     print(f"Top {k} Joints -> F_del Drop: -{del_drop:.4f} | F_ins Retention: {ins_retention*100:.1f}%")
 
-df.to_csv(f'results/{DATA_PREFIX}-run17/{CURRENT_ENSEMBLE}_fidelity_metrics.csv', index=False)
-print("Saved raw metrics to CSV.")
+fidelity_result = {
+    "schema_version": 1,
+    "metric": "deletion_insertion_fidelity",
+    "dataset": DATASET_NAME,
+    "run_id": RUN_ID,
+    "ensemble": CURRENT_ENSEMBLE,
+    "sample_count": len(results),
+    "k_values": K_VALUES,
+    "aggregate": {
+        "base_confidence_mean": base_confidence_mean,
+        "deletion_drop_mean": deletion_drop_mean,
+        "insertion_retention_mean": insertion_retention_mean,
+    },
+    "details_file": "fidelity_details.csv",
+}
+with (FIDELITY_DIR / "fidelity_results.json").open("w", encoding="utf-8") as result_file:
+    json.dump(fidelity_result, result_file, indent=2, sort_keys=True)
+
+print(f"Saved fidelity details to {details_path}.")

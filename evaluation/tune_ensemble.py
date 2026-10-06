@@ -8,6 +8,12 @@ import numpy as np
 from models.spatial_gcn import Spatial_GCN_Layer
 from models.temporal_brain import Temporal_Brain_Layer
 from utils.dataset import NTUSkeletonDataset
+from utils.pipeline_config import (
+    checkpoint_directory,
+    dataset_num_classes,
+    dataset_split_path,
+    select_pipeline_input,
+)
 
 # 1. HARDWARE
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -16,12 +22,14 @@ print(f"Device in-use: {device.type.upper()}")
 # 2. INITIALIZATION
 # IMPORTANT: Use the validation set to tune beta, NOT the test set!
 # You don't want to leak test data into your hyperparameter choices.
-VAL_DIR = 'data/xview/val_skeletons' 
+DATASET_NAME = 'xview'
+RUN_ID = 'run17'
+VAL_DIR = dataset_split_path(DATASET_NAME, 'val')
 BATCH_SIZE = 16
-NUM_CLASSES = 60
+NUM_CLASSES = dataset_num_classes(DATASET_NAME)
 
 print("Loading Data..")
-val_dataset = NTUSkeletonDataset(data_folder=VAL_DIR, max_frames=100, is_train=False)
+val_dataset = NTUSkeletonDataset(data_folder=VAL_DIR, max_frames=100)
 val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True)
 
 print("Loading Dual-Stream Architecture...")
@@ -32,9 +40,10 @@ gcn_k = Spatial_GCN_Layer(in_channels=9, out_channels=128).to(device)
 transformer_k = Temporal_Brain_Layer(embed_dim=128, num_heads=4, max_frames=100, max_bodies=2).to(device)
 classifier_k = nn.Linear(128, NUM_CLASSES).to(device)
 
-gcn_k.load_state_dict(torch.load('saved_weights/jbv/best_gcn.pth', map_location=device, weights_only=True))
-transformer_k.load_state_dict(torch.load('saved_weights/jbv/best_transformer.pth', map_location=device, weights_only=True))
-classifier_k.load_state_dict(torch.load('saved_weights/jbv/best_classifier.pth', map_location=device, weights_only=True))
+jbv_dir = checkpoint_directory(DATASET_NAME, RUN_ID, 'jbv')
+gcn_k.load_state_dict(torch.load(jbv_dir / 'best_gcn.pth', map_location=device, weights_only=True))
+transformer_k.load_state_dict(torch.load(jbv_dir / 'best_transformer.pth', map_location=device, weights_only=True))
+classifier_k.load_state_dict(torch.load(jbv_dir / 'best_classifier.pth', map_location=device, weights_only=True))
 global_node_k = transformer_k.global_node 
 
 gcn_k.eval()
@@ -48,9 +57,10 @@ gcn_b = Spatial_GCN_Layer(in_channels=3, out_channels=128).to(device)
 transformer_b = Temporal_Brain_Layer(embed_dim=128, num_heads=4, max_frames=100, max_bodies=2).to(device)
 classifier_b = nn.Linear(128, NUM_CLASSES).to(device)
 
-gcn_b.load_state_dict(torch.load('saved_weights/pure_joints/best_gcn.pth', map_location=device, weights_only=True))
-transformer_b.load_state_dict(torch.load('saved_weights/pure_joints/best_transformer.pth', map_location=device, weights_only=True))
-classifier_b.load_state_dict(torch.load('saved_weights/pure_joints/best_classifier.pth', map_location=device, weights_only=True))
+joints_dir = checkpoint_directory(DATASET_NAME, RUN_ID, 'joints')
+gcn_b.load_state_dict(torch.load(joints_dir / 'best_gcn.pth', map_location=device, weights_only=True))
+transformer_b.load_state_dict(torch.load(joints_dir / 'best_transformer.pth', map_location=device, weights_only=True))
+classifier_b.load_state_dict(torch.load(joints_dir / 'best_classifier.pth', map_location=device, weights_only=True))
 global_node_b = transformer_b.global_node 
 
 gcn_b.eval()
@@ -83,7 +93,7 @@ with torch.no_grad():
         all_probs_k.append(probs_k.cpu().numpy())
         
         # --- B. STRUCTURAL STREAM ---
-        bone_data = batched_data[:, :, :, :, 3:6]
+        bone_data = select_pipeline_input(batched_data, 'bones')
         input_b = bone_data.reshape(B * M, T, V, 3)
         feat_b = gcn_b(input_b)
         t_input_b = torch.cat([feat_b, global_node_b.expand(B*M, frames, 1, 128)], dim=2)

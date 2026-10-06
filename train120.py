@@ -5,26 +5,58 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 import os
+import argparse
 
 from models.spatial_gcn import Spatial_GCN_Layer
 from models.temporal_brain import Temporal_Brain_Layer
 from utils.dataset import NTUSkeletonDataset
+from utils.pipeline_config import (
+    checkpoint_directory,
+    dataset_num_classes,
+    dataset_split_path,
+    get_pipeline,
+    select_pipeline_input,
+    write_checkpoint_metadata,
+)
 
 # =====================
 # 1. HYPERPARAMETERS
 # =====================
-DATA_DIR = 'data/xsub120/train_skeletons' #CHANGE THIS DIRECTORY!!!
-VAL_DIR = 'data/xsub120/val_skeletons'
+DATASET_NAME = "xsub120"
+RUN_ID = "run17"
 BATCH_SIZE = 64 # -> change back to (16->64), when max frames is set back to 100
 EPOCHS = 100
 LEARNING_RATE = 0.001
 WEIGHT_DECAY = 1e-4
-NUM_CLASSES = 120
+NUM_CLASSES = dataset_num_classes(DATASET_NAME)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train an NTU-RGB+D 120 pipeline.")
+    parser.add_argument(
+        "--pipeline",
+        choices=("jbv", "joints", "bones", "velocity"),
+        default="jbv",
+        help="Input representation to train.",
+    )
+    return parser.parse_args()
+
 
 if __name__ == '__main__':
+    args = parse_args()
+    pipeline = get_pipeline(args.pipeline)
+    data_dir = dataset_split_path(DATASET_NAME, "train")
+    val_dir = dataset_split_path(DATASET_NAME, "val")
+    checkpoint_dir = checkpoint_directory(DATASET_NAME, RUN_ID, pipeline)
+    for split_path in (data_dir, val_dir):
+        if not (split_path / "binary_pt").is_dir():
+            raise FileNotFoundError(
+                f"Missing binary dataset split: {split_path / 'binary_pt'}. "
+                "Training requires both train and validation data."
+            )
+
     wandb.init(
         project="HAR-REAT",
-        name="Run17-xsub120-jbv-300frames",
+        name=f"{RUN_ID}-{DATASET_NAME}-{pipeline.name}",
         config={
             "learning_rate": LEARNING_RATE,
             "weight_decay": WEIGHT_DECAY,
@@ -32,26 +64,34 @@ if __name__ == '__main__':
             "dataset": "NTU-RGB+D",
             "epochs": EPOCHS,
             "batch_size": BATCH_SIZE,
-            "scheduler": "10-Epoch Linear Warmup + Cosine Decay"
+            "scheduler": "10-Epoch Linear Warmup + Cosine Decay",
+            "pipeline": pipeline.name,
+            "pipeline_display_name": pipeline.display_name,
+            "pipeline_channels": pipeline.in_channels,
+            "checkpoint_dir": str(checkpoint_dir),
         }
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
     print(f'Device Type: {device.type.upper()}')
+    print(f"Pipeline: {pipeline.display_name} ({pipeline.in_channels} channels)")
+    print(f"Training data: {data_dir}")
+    print(f"Validation data: {val_dir}")
+    print(f"Checkpoint directory: {checkpoint_dir}")
 
     # =====================
     # 2. INTIALIZATION
     # =====================
     print("Loading Dataset..")
-    dataset = NTUSkeletonDataset(data_folder=DATA_DIR, max_frames=100, is_train=False)
+    dataset = NTUSkeletonDataset(data_folder=str(data_dir), max_frames=100)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
 
     print("Loading Validation Dataset..")
-    val_dataset = NTUSkeletonDataset(data_folder=VAL_DIR, max_frames=100, is_train=False)
+    val_dataset = NTUSkeletonDataset(data_folder=str(val_dir), max_frames=100)
     val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
     # The Neural Networks
-    gcn = Spatial_GCN_Layer(in_channels=9, out_channels=128).to(device)
+    gcn = Spatial_GCN_Layer(in_channels=pipeline.in_channels, out_channels=128).to(device)
     transformer = Temporal_Brain_Layer(embed_dim=128, num_heads=4, max_frames=100, max_bodies=2).to(device)
     global_node = transformer.global_node
 
@@ -104,7 +144,8 @@ if __name__ == '__main__':
             labels = labels.to(device)
 
             B, M, T, V, C = batched_data.shape
-            gcn_input = batched_data.reshape(B*M, T, V, C)# (Batch*Bodies, Time, Joints, Channels)
+            selected_batch = select_pipeline_input(batched_data, pipeline)
+            gcn_input = selected_batch.reshape(B*M, T, V, pipeline.in_channels)
 
             # 1. Forward Pass (GCN)
             gcn_features = gcn(gcn_input) # Output: (Batch*2, Time, Joints, 64)
@@ -156,7 +197,8 @@ if __name__ == '__main__':
                 v_B, v_M, v_T, v_V, v_C = val_batch.shape
 
                 # Validation Folding Trick
-                val_gcn_input = val_batch.reshape(v_B*v_M, v_T, v_V, v_C) # (Batch*Bodies, Time, Joints, Channels)
+                selected_val_batch = select_pipeline_input(val_batch, pipeline)
+                val_gcn_input = selected_val_batch.reshape(v_B*v_M, v_T, v_V, pipeline.in_channels)
                 v_gcn_feat = gcn(val_gcn_input)
                 
                 v_frames = v_gcn_feat.shape[1]
@@ -179,10 +221,18 @@ if __name__ == '__main__':
 
         if epoch_val_acc > best_val_acc:
             best_val_acc = epoch_val_acc
-            os.makedirs('saved_weights/weights_xsub120_300-frames/jbv', exist_ok=True)
-            torch.save(gcn.state_dict(), 'saved_weights/weights_xsub120_300-frames/jbv/best_gcn.pth')
-            torch.save(transformer.state_dict(), 'saved_weights/weights_xsub120_300-frames/jbv/best_transformer.pth')
-            torch.save(classifier.state_dict(), 'saved_weights/weights_xsub120_300-frames/jbv/best_classifier.pth')
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            write_checkpoint_metadata(
+                checkpoint_dir,
+                DATASET_NAME,
+                RUN_ID,
+                pipeline,
+                max_frames=100,
+                num_classes=NUM_CLASSES,
+            )
+            torch.save(gcn.state_dict(), checkpoint_dir / 'best_gcn.pth')
+            torch.save(transformer.state_dict(), checkpoint_dir / 'best_transformer.pth')
+            torch.save(classifier.state_dict(), checkpoint_dir / 'best_classifier.pth')
             print(f"🌟 New Best Model! Saved with Val Acc: {best_val_acc:.2f}%")
 
         # Put models back into training mode for the next epoch!
@@ -212,12 +262,10 @@ if __name__ == '__main__':
 
         # Save weights every 10 epochs
         if (epoch + 1) % 10 == 0:
-            os.makedirs('saved_weights/weights_xsub120_300-frames/jbv', exist_ok=True)
-            torch.save(gcn.state_dict(), f'saved_weights/weights_xsub120_300-frames/jbv/gcn_epoch_{epoch+1}.pth')
-            torch.save(transformer.state_dict(), f'saved_weights/weights_xsub120_300-frames/jbv/transformer_epoch_{epoch+1}.pth')
-            torch.save(classifier.state_dict(), f'saved_weights/weights_xsub120_300-frames/jbv/classifier_epoch_{epoch+1}.pth')
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(gcn.state_dict(), checkpoint_dir / f'gcn_epoch_{epoch+1}.pth')
+            torch.save(transformer.state_dict(), checkpoint_dir / f'transformer_epoch_{epoch+1}.pth')
+            torch.save(classifier.state_dict(), checkpoint_dir / f'classifier_epoch_{epoch+1}.pth')
             print(f"-> Checkpoint saved for Epoch {epoch+1}")
 
     print("Training Complete!")
-
-
