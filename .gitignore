@@ -31,3 +31,4 @@ preprocessing/__pycache__
 __pycache__/
 *.pyc
 .vscode/
+web_app/
