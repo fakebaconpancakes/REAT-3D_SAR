@@ -12,6 +12,7 @@ from models.spatial_gcn import Spatial_GCN_Layer
 from models.temporal_brain import Temporal_Brain_Layer
 from utils.dataset import NTUSkeletonDataset
 from utils.xai_extractor import apply_differential_xai, normalize_global_heatmap
+from utils.action_labels import NTU_ACTION_LABELS
 from utils.pipeline_config import (
     checkpoint_directory,
     dataset_num_classes,
@@ -20,22 +21,7 @@ from utils.pipeline_config import (
     select_pipeline_input,
 )
 
-NTU_CLASSES = [
-    'drink water', 'eat meal/snack', 'brushing teeth', 'brushing hair', 'drop', 'pickup',
-    'throw', 'sitting down', 'standing up', 'clapping', 'reading', 'writing',
-    'tear up paper', 'wear jacket', 'take off jacket', 'wear a shoe', 'take off a shoe',
-    'wear on glasses', 'take off glasses', 'put on a hat/cap', 'take off a hat/cap',
-    'cheer up', 'hand waving', 'kicking something', 'reach into pocket', 'hopping',
-    'jump up', 'make a phone call', 'playing with phone/tablet', 'typing on a keyboard',
-    'pointing to something with finger', 'taking a selfie', 'check time (from watch)',
-    'rub two hands together', 'nod head/bow', 'shake head', 'wipe face', 'salute',
-    'put the palms together', 'cross hands in front (say stop)', 'sneeze/cough', 'staggering',
-    'falling', 'touch head (headache)', 'touch chest (stomachache)', 'touch back (backache)', 'touch neck (neckache)',
-    'nausea or vomiting condition', 'use a fan/feeling warm', 'punching/slapping other person',
-    'kicking other person', 'pushing other person', 'pat on back of other person',
-    'point finger at the other person', 'hugging other person', 'giving something to other person',
-    'touch other person\'s pocket', 'handshaking', 'walking towards each other', 'walking apart from each other'
-]
+NTU_CLASSES = NTU_ACTION_LABELS
 
 
 def action_name(label_index):
@@ -165,7 +151,9 @@ for file_idx in tqdm(range(args.start, end_idx), desc="Processing XAI"):
     png_path = FRAME_DIR / f"{target_base}_fused_peak.png"
     
     if npy_path.exists() and gif_path.exists() and png_path.exists():
+        existing_sample = manifest_samples.get(target_base, {})
         manifest_samples[target_base] = {
+            **existing_sample,
             "sample_id": target_base,
             "heatmap": str(npy_path.relative_to(RESULT_DIR)),
             "gif": str(gif_path.relative_to(RESULT_DIR)),
