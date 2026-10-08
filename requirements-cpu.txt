@@ -1,0 +1,9 @@
+# CPU installation for REAT inference and evaluation.
+# The model keeps the same 25-joint biological graph and uses a standard
+# PyTorch attention kernel on CPU.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+torchaudio
+-r requirements.txt

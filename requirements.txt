@@ -1,8 +1,7 @@
-# ─────────────────────────────────────────────────────────
 # REAT — HAR Project Dependencies
-# Install PyTorch SEPARATELY using the CUDA-specific command
-# from the SSH deployment guide (torch is NOT listed here
-# so pip doesn't pull a CPU-only build by accident).
+# Install PyTorch separately using either:
+#   pip install -r requirements-cpu.txt
+# or the CUDA-specific command for GPU environments.
 #
 # Example for CUDA 12.4:
 #   pip install torch==2.5.1 torchvision torchaudio \
@@ -10,14 +9,12 @@
 #
 # Then install the rest:
 #   pip install -r requirements.txt
-# ─────────────────────────────────────────────────────────
 
 numpy
 tqdm
 matplotlib
 pillow          # GIF writer for visualization_gif.py
 thop            # FLOPs/MACs profiler for complexity_profiler.py
-triton          # Triton GPU kernels (bundled with CUDA torch, listed for explicitness)
 plotly
 pandas
 wandb

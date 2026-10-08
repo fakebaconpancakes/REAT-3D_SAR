@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 import math
 
@@ -57,10 +58,11 @@ class Temporal_Brain_Layer(nn.Module):
         
         # The Global Node is the 26th token (index 25)
         self.global_node_idx = 25
-        self.compiled_self_attention = torch.compile(flex_attention)
+        self.compiled_self_attention = None
 
         self._num_heads = num_heads
         self._cached_block_mask = None   # built on first forward pass
+        self._cached_cpu_attention_mask = None
 
         global_node_idx_ref = self.global_node_idx
         def _static_mask_rule(b, h, q_idx, kv_idx):
@@ -70,6 +72,47 @@ class Temporal_Brain_Layer(nn.Module):
             return is_global_q | is_global_kv | same_room
         self._mask_rule = _static_mask_rule
 
+    def _spatial_attention(self, q, k, v, device):
+        if device.type == "cpu":
+            if self._cached_cpu_attention_mask is None:
+                physical_rooms = self.room_map[:25]
+                same_room = physical_rooms.unsqueeze(0) == physical_rooms.unsqueeze(1)
+                global_connections = torch.ones(
+                    26,
+                    26,
+                    dtype=torch.bool,
+                    device=device,
+                )
+                global_connections[:25, :25] = same_room
+                self._cached_cpu_attention_mask = global_connections
+
+            return F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=self._cached_cpu_attention_mask,
+                dropout_p=0.0,
+            )
+
+        if self.compiled_self_attention is None:
+            self.compiled_self_attention = torch.compile(flex_attention)
+
+        if self._cached_block_mask is None:
+            self._cached_block_mask = create_block_mask(
+                self._mask_rule,
+                B=None,
+                H=self._num_heads,
+                Q_LEN=26,
+                KV_LEN=26,
+                device=device,
+            )
+
+        return self.compiled_self_attention(
+            q,
+            k,
+            v,
+            block_mask=self._cached_block_mask,
+        )
 
     def forward(self, x, B, M, body_mask=None, return_attention=False):
         # x -> shape: (B*M, Time, 26, Embed_Dim)
@@ -86,12 +129,7 @@ class Temporal_Brain_Layer(nn.Module):
         k = qkv[1].contiguous()
         v = qkv[2].contiguous()
 
-        if self._cached_block_mask is None:
-            self._cached_block_mask = create_block_mask(
-                self._mask_rule, B=None, H=self._num_heads, Q_LEN = 26, KV_LEN=26, device=x.device
-            )
-        
-        attn_output = self.compiled_self_attention(q, k, v, block_mask=self._cached_block_mask)
+        attn_output = self._spatial_attention(q, k, v, x.device)
         attn_output = attn_output.permute(0, 2, 1, 3).contiguous().view(B_M * T, S, E)
 
         attn_output = self.spatial_out_proj(attn_output)
@@ -139,13 +177,13 @@ class Temporal_Brain_Layer(nn.Module):
         # B. Tile the mask to cover both bodies (M*T x M*T)
         valid_mt_mask = valid_time_mask.repeat(M, M)
 
-        # C. Create the additive mask (-inf blocks attention, 0.0 allows it)
-        attn_mask = torch.zeros((L_seq, L_seq), device=x.device, dtype=x.dtype)
+        # C. Create a boolean mask (True blocks attention, False allows it)
+        attn_mask = torch.zeros((L_seq, L_seq), device=x.device, dtype=torch.bool)
 
         # D. The Video CEO Token (Index 0) is already 0.0, so it natively sees everything!
 
-        # E. Apply the banded window to the sequence by blocking out the invalid pairs
-        attn_mask[1:, 1:].masked_fill_(~valid_mt_mask, float('-inf'))
+        # E. Apply the banded window to the sequence by blocking out invalid pairs
+        attn_mask[1:, 1:] = ~valid_mt_mask
 
         # 7. Temporal attention
         x_temp_norm = self.temporal_norm1(x_temporal)
