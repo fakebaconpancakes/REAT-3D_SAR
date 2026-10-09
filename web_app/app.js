@@ -3,7 +3,7 @@ const EDGES = [[0, 1], [1, 20], [2, 20], [3, 2], [4, 20], [5, 4], [6, 5], [7, 6]
 const SKELETON_LAYOUT = { 3: [260, 35], 2: [260, 70], 20: [260, 110], 1: [260, 160], 0: [260, 205], 4: [215, 112], 5: [185, 145], 6: [165, 180], 7: [150, 210], 21: [138, 224], 22: [160, 224], 8: [305, 112], 9: [335, 145], 10: [355, 180], 11: [370, 210], 23: [360, 224], 24: [382, 224], 12: [232, 250], 13: [225, 295], 14: [218, 338], 15: [212, 382], 16: [288, 250], 17: [295, 295], 18: [302, 338], 19: [308, 382] };
 const $ = (id) => document.getElementById(id);
 const state = { catalog: null, manifest: null, fidelity: null, semantic: null, semanticDetails: null, bundle: "", heatmap: null, bundleRequest: 0, sampleRequest: 0, selectedPipeline: "jbv" };
-const mediaState = { mode: "gif", gif: "", png: "" };
+const mediaState = { gif: "", png: "" };
 const formatPercent = (value) => `${(Number(value || 0) * 100).toFixed(1)}%`;
 const formatValue = (value, digits = 3) => Number(value || 0).toFixed(digits);
 
@@ -58,9 +58,13 @@ function selectPipeline(pipeline, load = true) {
   const datasets = state.catalog?.datasets || [];
   const dataset = datasets.find((item) => item.dataset === $("dataset-select").value);
   const run = dataset?.runs.find((item) => item.run_id === $("run-select").value);
+  if (!load) {
+    if (run?.ensembles.includes(targetEnsemble)) $("ensemble-select").value = targetEnsemble;
+    return;
+  }
   if (run?.ensembles.includes(targetEnsemble)) {
     $("ensemble-select").value = targetEnsemble;
-    if (load) loadBundle().catch(showError);
+    loadBundle().catch(showError);
   } else {
     const row = document.querySelector(`.pipeline-row[data-pipeline="${pipeline}"]`);
     row?.setAttribute("aria-label", `${detail[0]} results are not available for the selected run`);
@@ -100,7 +104,7 @@ function drawTemporal(heatmap, body, peakFrame = null) {
 }
 
 function stat(label, value) { return `<div class="stat"><strong>${value}</strong><small>${label}</small></div>`; }
-function drawSemantic() { const semantic = state.semantic || {}; const score = Number.isFinite(Number(semantic.accuracy)) ? formatPercent(semantic.accuracy) : "Unavailable"; const hits = Number(semantic.hits || 0), samples = Number(semantic.sample_count || 0); $("semantic-summary").innerHTML = [stat("Pointing accuracy", score), stat("Correct hits", hits), stat("Samples", samples), stat("Misses", Math.max(0, samples - hits))].join(""); $("validation-score").textContent = score; $("validation-stats").innerHTML = [stat("Pointing accuracy", score), stat("Correct hits", hits), stat("Samples", samples), stat("Misses", Math.max(0, samples - hits))].join(""); }
+function drawSemantic() { const semantic = state.semantic || {}; const score = Number.isFinite(Number(semantic.accuracy)) ? formatPercent(semantic.accuracy) : "Unavailable"; const hits = Number(semantic.hits || 0), samples = Number(semantic.sample_count || 0); $("validation-score").textContent = score; $("validation-stats").innerHTML = [stat("Pointing accuracy", score), stat("Correct hits", hits), stat("Samples", samples), stat("Misses", Math.max(0, samples - hits))].join(""); }
 function groupLabel(name) { return name.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function groupForJoint(jointIndex) {
   const groups = state.semanticDetails?.anatomical_groups || {};
@@ -183,9 +187,30 @@ function exploreBundleChanged() {
 }
 function drawFidelitySeries(canvasId, ks, values, color) { const canvas = $(canvasId); const { ctx, width, height } = setupCanvas(canvas, 260); const plot = { left: 66, top: 25, right: 16, bottom: 52 }; const xFor = (i) => plot.left + i * ((width - plot.left - plot.right) / Math.max(1, ks.length - 1)); const yFor = (v) => height - plot.bottom - Math.max(0, Math.min(1, v)) * (height - plot.top - plot.bottom); ctx.clearRect(0, 0, width, height); ctx.font = "10px Inter, sans-serif"; for (let tick = 0; tick <= 4; tick += 1) { const y = yFor(tick / 4); ctx.strokeStyle = "rgba(0,0,0,.07)"; ctx.beginPath(); ctx.moveTo(plot.left, y); ctx.lineTo(width - plot.right, y); ctx.stroke(); ctx.fillStyle = "#8c8c91"; ctx.fillText((tick / 4).toFixed(2), 25, y + 4); } ctx.beginPath(); values.forEach((value, index) => { const x = xFor(index), y = yFor(value); index ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.stroke(); values.forEach((value, index) => { const x = xFor(index), y = yFor(value); ctx.beginPath(); ctx.fillStyle = color; ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = "#8c8c91"; ctx.fillText(String(ks[index]), x - 4, height - 30); }); ctx.fillStyle = "#6e6e73"; ctx.textAlign = "center"; ctx.fillText("Number of joints (k)", (plot.left + width - plot.right) / 2, height - 8); ctx.save(); ctx.translate(12, (plot.top + height - plot.bottom) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("True-class confidence", 0, 0); ctx.restore(); ctx.textAlign = "start"; }
 function drawFidelity() { const fidelity = state.fidelity || {}, aggregate = fidelity.aggregate || {}, ks = fidelity.k_values || [], base = Number(aggregate.base_confidence_mean); $("deletion-title").textContent = "Aggregate deletion"; $("insertion-title").textContent = "Aggregate insertion"; if (!ks.length || !Number.isFinite(base)) { for (const id of ["deletion-canvas", "insertion-canvas"]) { const canvas = $(id), { ctx, width, height } = setupCanvas(canvas, 260); ctx.clearRect(0, 0, width, height); ctx.fillStyle = "#8c8c91"; ctx.font = "12px Inter, sans-serif"; ctx.textAlign = "center"; ctx.fillText("Fidelity data unavailable", width / 2, height / 2); ctx.textAlign = "start"; } return; } const deletion = [base].concat(ks.map((k) => base - Number(aggregate.deletion_drop_mean?.[String(k)] || 0))); const insertion = [0].concat(ks.map((k) => Number(aggregate.insertion_retention_mean?.[String(k)] || 0) * base)); drawFidelitySeries("deletion-canvas", [0].concat(ks), deletion, "#ff375f"); drawFidelitySeries("insertion-canvas", [0].concat(ks), insertion, "#34c759"); }
-function showMedia(mode) { mediaState.mode = mode; const gif = mode === "gif", image = $(gif ? "gif-image" : "static-image"), url = gif ? mediaState.gif : mediaState.png, link = $("media-open-link"); $("gif-image").style.display = gif ? "block" : "none"; $("static-image").style.display = gif ? "none" : "block"; $("gif-toggle").classList.toggle("active", gif); $("png-toggle").classList.toggle("active", !gif); link.href = url || "#"; link.setAttribute("aria-disabled", String(!url)); link.tabIndex = url ? 0 : -1; image.alt = url ? (gif ? "Animated XAI explanation" : "Peak frame XAI explanation") : "No explanation media available"; }
-function setView(view) { document.querySelectorAll(".side-nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view)); document.querySelectorAll(".view-panel").forEach((panel) => panel.classList.toggle("active", panel.id === `${view}-view`)); document.body.classList.toggle("explore-active", view === "explore"); document.body.classList.toggle("home-active", view === "home"); $("breadcrumb-view").textContent = view[0].toUpperCase() + view.slice(1); requestAnimationFrame(() => { if (view === "home") drawBenchmarkChart(); if (view === "validation" && state.fidelity) drawFidelity(); if ((view === "overview" || view === "explain") && state.heatmap) { const body = Number($("body-select").value), frames = state.heatmap.values?.[body] || []; if (frames.length) { const frame = frames.reduce((best, values, index) => values.reduce((sum, value) => sum + Number(value || 0), 0) > best.value ? { index, value: values.reduce((sum, value) => sum + Number(value || 0), 0) } : best, { index: 0, value: -Infinity }).index; drawSkeleton(state.heatmap, body, frame); drawTemporal(state.heatmap, body, frame); } } }); }
-function populateSample(sample) { const detail = state.semanticDetails?.samples?.find((item) => item.sample_id === sample.sample_id); const predictedAction = sample.predicted_action || "Prediction unavailable"; const trueAction = sample.true_action || detail?.action_label || "Unknown action"; const actionIndex = sample.true_label ?? detail?.action_idx ?? sample.predicted_label; const classLabel = actionIndex === undefined || actionIndex === null ? "Unavailable" : `Class ${Number(actionIndex)}`; const hasConfidence = Number.isFinite(Number(sample.predicted_confidence)); const confidence = hasConfidence ? sample.predicted_confidence : 0; $("sample-title").textContent = sample.sample_id; $("confidence-badge").textContent = hasConfidence ? `${formatPercent(confidence)} confidence` : "Confidence unavailable"; $("prediction-content").innerHTML = `<p class="prediction-label">Predicted action</p><p class="prediction-name">${predictedAction}</p><p class="prediction-meta">True label: <strong>${trueAction}</strong> · ${classLabel}</p>`; $("insight-content").innerHTML = `<div class="insight-row"><span>Prediction</span><strong>${predictedAction}</strong></div><div class="insight-row"><span>Ground truth</span><strong>${trueAction}</strong></div><div class="insight-row"><span>Class</span><strong>${classLabel}</strong></div><div class="insight-row"><span>Confidence</span><strong>${hasConfidence ? formatPercent(confidence) : "Unavailable"}</strong></div><div class="insight-row"><span>Heatmap shape</span><strong>${(sample.heatmap_shape || []).join(" × ") || "Unavailable"}</strong></div>`; }
+function updateMediaLinks() { [["gif-open-link", mediaState.gif], ["png-open-link", mediaState.png]].forEach(([id, url]) => { const link = $(id); link.href = url || "#"; link.setAttribute("aria-disabled", String(!url)); link.tabIndex = url ? 0 : -1; }); }
+function setView(view) { document.querySelectorAll(".side-nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view)); document.querySelectorAll(".view-panel").forEach((panel) => panel.classList.toggle("active", panel.id === `${view}-view`)); document.body.classList.toggle("explore-active", view === "explore"); document.body.classList.toggle("home-active", view === "home"); $("breadcrumb-view").textContent = view[0].toUpperCase() + view.slice(1); requestAnimationFrame(() => { if (view === "home") drawBenchmarkChart(); if (view === "validation" && state.fidelity) drawFidelity(); if (view === "overview" && state.heatmap) { const body = Number($("body-select").value), frames = state.heatmap.values?.[body] || []; if (frames.length) { const frame = frames.reduce((best, values, index) => values.reduce((sum, value) => sum + Number(value || 0), 0) > best.value ? { index, value: values.reduce((sum, value) => sum + Number(value || 0), 0) } : best, { index: 0, value: -Infinity }).index; drawSkeleton(state.heatmap, body, frame); drawTemporal(state.heatmap, body, frame); } } }); }
+function populateSample(sample) {
+  const detail = state.semanticDetails?.samples?.find((item) => item.sample_id === sample.sample_id);
+  const predictedAction = sample.predicted_action || "Prediction unavailable";
+  const trueAction = sample.true_action || detail?.action_label || "Unknown action";
+  const trueLabel = sample.true_label ?? detail?.action_idx;
+  const predictedLabel = sample.predicted_label;
+  const classLabel = trueLabel === undefined || trueLabel === null ? "Unavailable" : `Class ${Number(trueLabel)}`;
+  const hasConfidence = sample.predicted_confidence !== undefined && sample.predicted_confidence !== null && Number.isFinite(Number(sample.predicted_confidence));
+  const correct = trueLabel !== undefined && trueLabel !== null && predictedLabel !== undefined && predictedLabel !== null
+    ? Number(trueLabel) === Number(predictedLabel)
+    : trueAction !== "Unknown action" && predictedAction !== "Prediction unavailable"
+      ? trueAction.toLowerCase() === predictedAction.toLowerCase()
+      : null;
+  const confidenceReadout = $("confidence-readout");
+  confidenceReadout.classList.toggle("is-correct", correct === true);
+  confidenceReadout.classList.toggle("is-wrong", correct === false);
+  confidenceReadout.classList.toggle("is-unknown", correct === null);
+  $("confidence-badge").textContent = hasConfidence ? formatPercent(sample.predicted_confidence) : "Unavailable";
+  $("prediction-correctness").textContent = correct === null ? "Correctness unavailable" : correct ? "Correct prediction" : "Incorrect prediction";
+  $("sample-title").textContent = sample.sample_id;
+  $("prediction-content").innerHTML = `<p class="prediction-label">Predicted action</p><p class="prediction-name">${predictedAction}</p><p class="prediction-meta">True label: <strong>${trueAction}</strong> · ${classLabel}</p>`;
+}
 async function loadSample() {
   const sample = selectedSample(), bundle = state.bundle, requestId = ++state.sampleRequest;
   if (!sample || !bundle || !sample.heatmap) return;
@@ -202,7 +227,9 @@ async function loadSample() {
   if (frames.length) { drawSkeleton(heatmap, body, frame); drawTemporal(heatmap, body, frame); }
   mediaState.gif = sample.gif ? `${bundle}/${sample.gif}` : '';
   mediaState.png = sample.static_image ? `${bundle}/${sample.static_image}` : '';
-  $('gif-image').src = mediaState.gif; $('static-image').src = mediaState.png; showMedia(mediaState.mode);
+  if (mediaState.gif) $('gif-image').src = mediaState.gif; else $('gif-image').removeAttribute('src');
+  if (mediaState.png) $('static-image').src = mediaState.png; else $('static-image').removeAttribute('src');
+  updateMediaLinks();
 }
 async function loadBundle() {
   const dataset = $('dataset-select').value, run = $('run-select').value, ensemble = $('ensemble-select').value;
@@ -229,7 +256,7 @@ async function loadBundle() {
   drawSemantic(); drawExplore(); populateExploreSelectors();
   $('experiment-details').innerHTML = `<div class="detail-row"><span>Dataset</span><strong>${dataset}</strong></div><div class="detail-row"><span>Run</span><strong>${run}</strong></div><div class="detail-row"><span>Ensemble</span><strong>${ensemble}</strong></div><div class="detail-row"><span>Samples evaluated</span><strong>${samples.length}</strong></div>`;
   drawFidelity(); $('bundle-status').textContent = 'Results loaded'; $('sidebar-status').textContent = `${samples.length} samples available`;
-  if (samples.length) await loadSample(); else { state.heatmap = null; $('sample-title').textContent = 'No samples available'; $('prediction-content').innerHTML = '<p class="empty-state">This result bundle has no samples to display.</p>'; }
+  if (samples.length) await loadSample(); else { state.heatmap = null; $('sample-title').textContent = 'No samples available'; $('prediction-content').innerHTML = '<p class="empty-state">This result bundle has no samples to display.</p>'; $('confidence-badge').textContent = 'Unavailable'; $('prediction-correctness').textContent = 'Correctness unavailable'; $('confidence-readout').classList.remove('is-correct', 'is-wrong'); $('confidence-readout').classList.add('is-unknown'); }
 }
 function updateRuns() {
   const dataset = state.catalog?.datasets.find((item) => item.dataset === $('dataset-select').value);
@@ -267,10 +294,9 @@ async function start() {
     document.querySelectorAll('.architecture-node').forEach((node) => node.onclick = () => selectArchitectureBlock(node.dataset.architecture));
     $('heatmap-canvas').addEventListener('mousemove', updateHeatmapTooltip);
     $('heatmap-canvas').addEventListener('mouseleave', hideHeatmapTooltip);
-    $('gif-toggle').onclick = () => showMedia('gif'); $('png-toggle').onclick = () => showMedia('png');
-    $('gif-image').onerror = () => { mediaState.gif = ''; $('gif-image').removeAttribute('src'); if (mediaState.mode === 'gif') showMedia('gif'); };
-    $('static-image').onerror = () => { mediaState.png = ''; $('static-image').removeAttribute('src'); if (mediaState.mode === 'png') showMedia('png'); };
-    $('media-open-link').onclick = (event) => { if (event.currentTarget.getAttribute('aria-disabled') === 'true') event.preventDefault(); };
+    $('gif-image').onerror = (event) => { if (event.currentTarget.getAttribute('src') !== mediaState.gif) return; mediaState.gif = ''; event.currentTarget.removeAttribute('src'); updateMediaLinks(); };
+    $('static-image').onerror = (event) => { if (event.currentTarget.getAttribute('src') !== mediaState.png) return; mediaState.png = ''; event.currentTarget.removeAttribute('src'); updateMediaLinks(); };
+    for (const id of ['gif-open-link', 'png-open-link']) $(id).onclick = (event) => { if (event.currentTarget.getAttribute('aria-disabled') === 'true') event.preventDefault(); };
     window.addEventListener('resize', () => { const view = document.querySelector('.view-panel.active')?.id.replace('-view', ''); if (view) setView(view); });
     selectPipeline('jbv', false); selectArchitectureBlock('input'); drawBenchmarkChart();
     $('dataset-select').value = datasets[0].dataset;

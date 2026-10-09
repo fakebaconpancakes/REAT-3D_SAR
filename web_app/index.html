@@ -23,8 +23,7 @@
         <div class="sidebar-label">Workspace</div>
         <nav class="side-nav" aria-label="Primary navigation">
           <button class="side-nav-item active" type="button" data-view="home"><span class="nav-icon">⌂</span>Home</button>
-          <button class="side-nav-item" type="button" data-view="overview"><span class="nav-icon">◒</span>Overview</button>
-          <button class="side-nav-item" type="button" data-view="explain"><span class="nav-icon">✦</span>Explainability</button>
+          <button class="side-nav-item" type="button" data-view="overview"><span class="nav-icon">◒</span>Explainability</button>
           <button class="side-nav-item" type="button" data-view="validation"><span class="nav-icon">◌</span>Validation</button>
         </nav>
         <div class="sidebar-spacer"></div>
@@ -141,27 +140,29 @@
                 <div class="skeleton-stage"><canvas id="skeleton-canvas"></canvas><div class="stage-legend"><span><i class="legend-low"></i>Low</span><span><i class="legend-high"></i>High attribution</span></div></div>
               </article>
               <article class="card sample-card">
-                <div class="card-header"><div><span class="card-kicker">PREDICTION</span><h3>Model readout</h3></div><span class="confidence-badge" id="confidence-badge">—</span></div>
+                <div class="card-header"><div><span class="card-kicker">PREDICTION</span><h3>Model readout</h3></div></div>
                 <div id="prediction-content" class="prediction-content"></div>
                 <div class="sample-divider"></div>
-                <div id="semantic-summary" class="stat-grid"></div>
+                <div id="confidence-readout" class="confidence-readout">
+                  <span>Prediction confidence</span>
+                  <strong id="confidence-badge">—</strong>
+                  <small id="prediction-correctness">—</small>
+                </div>
+              </article>
+            </div>
+            <div class="media-layout combined-media-layout">
+              <article class="card media-card">
+                <div class="card-header media-section-heading"><div><span class="card-kicker">EXPLANATION MEDIA</span><h3>Sequence and key frame</h3><p class="card-description">Compare the full motion explanation with its most important frame.</p></div></div>
+                <div class="media-pair">
+                  <figure class="media-item"><div class="media-frame"><img id="gif-image" class="media-image" alt="Animated XAI explanation"></div><figcaption><strong>Full sequence</strong><a id="gif-open-link" target="_blank" rel="noreferrer">Open GIF ↗</a></figcaption></figure>
+                  <figure class="media-item"><div class="media-frame"><img id="static-image" class="static-image" alt="Peak frame XAI explanation"></div><figcaption><strong>Key frame</strong><a id="png-open-link" target="_blank" rel="noreferrer">Open PNG ↗</a></figcaption></figure>
+                </div>
               </article>
             </div>
             <article class="card timeline-card">
               <div class="card-header"><div><span class="card-kicker">EXPLANATION MAP</span><h3>Temporal importance</h3></div><span class="subtle-label">25 joints · 100 frames</span></div>
               <div class="heatmap-scroll"><div class="heatmap-row"><div id="heatmap-labels" class="heatmap-labels"></div><div class="heatmap-canvas-wrap"><canvas id="heatmap-canvas"></canvas><div id="heatmap-tooltip" class="heatmap-tooltip" role="status"></div></div></div></div>
             </article>
-          </section>
-
-          <section class="view-panel" id="explain-view">
-            <div class="section-heading"><div><p class="eyebrow">EXPLANATION MEDIA</p><h2>Follow the motion</h2><p class="section-copy">Replay the sequence or inspect the model's most important frame.</p></div></div>
-            <div class="media-layout">
-              <article class="card media-card">
-                <div class="media-toolbar"><div class="segmented"><button id="gif-toggle" class="active" type="button">Sequence</button><button id="png-toggle" type="button">Peak frame</button></div><a id="media-open-link" target="_blank" rel="noreferrer">Open media ↗</a></div>
-                <div class="media-frame"><img id="gif-image" class="media-image" alt="Animated XAI explanation"><img id="static-image" class="static-image" alt="Static XAI explanation"></div>
-              </article>
-              <article class="card insight-card"><span class="card-kicker">READOUT</span><h3>What changed?</h3><div id="insight-content"></div><div class="insight-note">Attribution values indicate relative importance across the sequence. They are not class probabilities.</div></article>
-            </div>
           </section>
 
           <section class="view-panel" id="validation-view">
