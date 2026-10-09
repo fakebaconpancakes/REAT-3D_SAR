@@ -2,12 +2,12 @@ const JOINTS = ["SpineBase", "SpineMid", "Neck", "Head", "ShoulderL", "ElbowL", 
 const EDGES = [[0, 1], [1, 20], [2, 20], [3, 2], [4, 20], [5, 4], [6, 5], [7, 6], [8, 20], [9, 8], [10, 9], [11, 10], [12, 0], [13, 12], [14, 13], [15, 14], [16, 0], [17, 16], [18, 17], [19, 18], [21, 22], [22, 7], [23, 24], [24, 11]];
 const SKELETON_LAYOUT = { 3: [260, 35], 2: [260, 70], 20: [260, 110], 1: [260, 160], 0: [260, 205], 4: [215, 112], 5: [185, 145], 6: [165, 180], 7: [150, 210], 21: [138, 224], 22: [160, 224], 8: [305, 112], 9: [335, 145], 10: [355, 180], 11: [370, 210], 23: [360, 224], 24: [382, 224], 12: [232, 250], 13: [225, 295], 14: [218, 338], 15: [212, 382], 16: [288, 250], 17: [295, 295], 18: [302, 338], 19: [308, 382] };
 const $ = (id) => document.getElementById(id);
-const state = { catalog: null, manifest: null, fidelity: null, semantic: null, semanticDetails: null, bundle: "", heatmap: null };
+const state = { catalog: null, manifest: null, fidelity: null, semantic: null, semanticDetails: null, bundle: "", heatmap: null, bundleRequest: 0, sampleRequest: 0, selectedPipeline: "jbv" };
 const mediaState = { mode: "gif", gif: "", png: "" };
 const formatPercent = (value) => `${(Number(value || 0) * 100).toFixed(1)}%`;
 const formatValue = (value, digits = 3) => Number(value || 0).toFixed(digits);
 
-async function getJson(path) { const response = await fetch(path); if (!response.ok) throw new Error(`Could not load ${path}`); return response.json(); }
+async function getJson(path) { const response = await fetch(path); if (!response.ok) throw new Error(`Could not load ${path} (${response.status})`); return response.json(); }
 function reset(select) { select.replaceChildren(); }
 function option(select, value, label = value) { select.add(new Option(label, value)); }
 function bundlePath(dataset, run, ensemble) { return `results/${encodeURIComponent(dataset)}/${encodeURIComponent(run)}/${encodeURIComponent(ensemble)}`; }
@@ -47,7 +47,26 @@ function drawBenchmarkChart() {
   benchmarkSeries.forEach((series, groupIndex) => { series.values.forEach((value, streamIndex) => { const x = plot.left + groupIndex * groupWidth + (groupWidth - barWidth * 4) / 2 + streamIndex * barWidth; const y = yFor(value); ctx.fillStyle = ["#8c8c91", "#66b4ff", "#5ac8fa", series.color][streamIndex]; ctx.fillRect(x, y, barWidth - 2, height - plot.bottom - y); }); ctx.fillStyle = "#6e6e73"; ctx.textAlign = "center"; ctx.fillText(series.label, plot.left + groupIndex * groupWidth + groupWidth / 2, height - 31); });
   ctx.textAlign = "left"; ctx.textBaseline = "middle"; const legendLabels = ["JBV", "2-stream", "3-stream", "4-stream"], legendColors = ["#8c8c91", "#66b4ff", "#5ac8fa", "#0071e3"]; const legendGap = 16; const legendWidth = legendLabels.reduce((total, label) => total + 20 + ctx.measureText(label).width, 0) + legendGap * (legendLabels.length - 1); let legendX = Math.max(plot.left, width - legendWidth - 8); const legendY = height - 10; legendLabels.forEach((label, index) => { ctx.fillStyle = legendColors[index]; ctx.fillRect(legendX, legendY - 4, 8, 8); ctx.fillStyle = "#6e6e73"; ctx.fillText(label, legendX + 12, legendY); legendX += 20 + ctx.measureText(label).width + legendGap; }); ctx.textBaseline = "alphabetic";
 }
-function selectPipeline(pipeline) { const detail = pipelineDescriptions[pipeline] || pipelineDescriptions.jbv; document.querySelectorAll(".pipeline-row").forEach((row) => row.classList.toggle("selected", row.dataset.pipeline === pipeline)); $("pipeline-detail").innerHTML = `<strong>${detail[0]}</strong><span>${detail[1]}</span><small>${detail[2]}</small>`; }
+function ensembleForPipeline(pipeline) { const streamCount = ({ jbv: 1, "jbv-v": 2, "jbv-j": 2, "jbv-j-v": 3, "jbv-b-v": 3, full: 4 })[pipeline] || 1; return ["pure", "2-stream", "3-stream", "4-stream"][streamCount - 1]; }
+function pipelineForEnsemble(ensemble) { return ({ pure: "jbv", "2-stream": "jbv-v", "3-stream": "jbv-j-v", "4-stream": "full" })[ensemble] || "jbv"; }
+function selectPipeline(pipeline, load = true) {
+  const detail = pipelineDescriptions[pipeline] || pipelineDescriptions.jbv;
+  state.selectedPipeline = pipeline;
+  document.querySelectorAll(".pipeline-row").forEach((row) => row.classList.toggle("selected", row.dataset.pipeline === pipeline));
+  $("pipeline-detail").innerHTML = `<strong>${detail[0]}</strong><span>${detail[1]}</span><small>${detail[2]}</small>`;
+  const targetEnsemble = ensembleForPipeline(pipeline);
+  const datasets = state.catalog?.datasets || [];
+  const dataset = datasets.find((item) => item.dataset === $("dataset-select").value);
+  const run = dataset?.runs.find((item) => item.run_id === $("run-select").value);
+  if (run?.ensembles.includes(targetEnsemble)) {
+    $("ensemble-select").value = targetEnsemble;
+    if (load) loadBundle().catch(showError);
+  } else {
+    const row = document.querySelector(`.pipeline-row[data-pipeline="${pipeline}"]`);
+    row?.setAttribute("aria-label", `${detail[0]} results are not available for the selected run`);
+    showError(new Error(`No ${targetEnsemble} result bundle is available for the selected run.`));
+  }
+}
 function selectArchitectureBlock(block) { const detail = architectureDescriptions[block] || architectureDescriptions.input; document.querySelectorAll(".architecture-node").forEach((node) => node.classList.toggle("selected", node.dataset.architecture === block)); $("architecture-detail").innerHTML = `<strong>${detail[0]}</strong><span>${detail[1]}</span><small>${detail[2]}</small>`; }
 function updateHeatmapTooltip(event) {
   const canvas = $("heatmap-canvas"), tooltip = $("heatmap-tooltip"), peakFrame = Number(canvas.dataset.peakFrame), frameCount = Number(canvas.dataset.frameCount);
@@ -81,7 +100,7 @@ function drawTemporal(heatmap, body, peakFrame = null) {
 }
 
 function stat(label, value) { return `<div class="stat"><strong>${value}</strong><small>${label}</small></div>`; }
-function drawSemantic() { const semantic = state.semantic; const score = formatPercent(semantic.accuracy); $("semantic-summary").innerHTML = [stat("Pointing accuracy", score), stat("Correct hits", semantic.hits), stat("Samples", semantic.sample_count), stat("Misses", semantic.sample_count - semantic.hits)].join(""); $("validation-score").textContent = score; $("validation-stats").innerHTML = [stat("Pointing accuracy", score), stat("Correct hits", semantic.hits), stat("Samples", semantic.sample_count), stat("Misses", semantic.sample_count - semantic.hits)].join(""); }
+function drawSemantic() { const semantic = state.semantic || {}; const score = Number.isFinite(Number(semantic.accuracy)) ? formatPercent(semantic.accuracy) : "Unavailable"; const hits = Number(semantic.hits || 0), samples = Number(semantic.sample_count || 0); $("semantic-summary").innerHTML = [stat("Pointing accuracy", score), stat("Correct hits", hits), stat("Samples", samples), stat("Misses", Math.max(0, samples - hits))].join(""); $("validation-score").textContent = score; $("validation-stats").innerHTML = [stat("Pointing accuracy", score), stat("Correct hits", hits), stat("Samples", samples), stat("Misses", Math.max(0, samples - hits))].join(""); }
 function groupLabel(name) { return name.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function groupForJoint(jointIndex) {
   const groups = state.semanticDetails?.anatomical_groups || {};
@@ -121,9 +140,27 @@ function renderSemanticSample(selectedGroup = null) {
 }
 function populateExploreSelectors() {
   const dataset = $("dataset-select").value, run = $("run-select").value, ensemble = $("ensemble-select").value;
-  reset($("explore-dataset-select")); state.catalog.datasets.forEach((item) => option($("explore-dataset-select"), item.dataset)); $("explore-dataset-select").value = dataset;
-  reset($("explore-run-select")); state.catalog.datasets.find((item) => item.dataset === dataset).runs.forEach((item) => option($("explore-run-select"), item.run_id)); $("explore-run-select").value = run;
-  reset($("explore-ensemble-select")); state.catalog.datasets.find((item) => item.dataset === dataset).runs.find((item) => item.run_id === run).ensembles.forEach((item) => option($("explore-ensemble-select"), item)); $("explore-ensemble-select").value = ensemble;
+  reset($("explore-dataset-select"));
+  (state.catalog?.datasets || []).forEach((item) => option($("explore-dataset-select"), item.dataset));
+  $("explore-dataset-select").value = dataset;
+  updateExploreRuns(run, ensemble, false);
+}
+function updateExploreRuns(preferredRun = "", preferredEnsemble = "", load = true) {
+  const dataset = state.catalog?.datasets.find((item) => item.dataset === $("explore-dataset-select").value);
+  reset($("explore-run-select"));
+  (dataset?.runs || []).forEach((item) => option($("explore-run-select"), item.run_id));
+  const runId = dataset?.runs.some((item) => item.run_id === preferredRun) ? preferredRun : dataset?.runs[0]?.run_id;
+  $("explore-run-select").value = runId || "";
+  updateExploreEnsembles(preferredEnsemble, load);
+}
+function updateExploreEnsembles(preferredEnsemble = "", load = true) {
+  const dataset = state.catalog?.datasets.find((item) => item.dataset === $("explore-dataset-select").value);
+  const run = dataset?.runs.find((item) => item.run_id === $("explore-run-select").value);
+  reset($("explore-ensemble-select"));
+  (run?.ensembles || []).forEach((item) => option($("explore-ensemble-select"), item));
+  const ensemble = run?.ensembles.includes(preferredEnsemble) ? preferredEnsemble : run?.ensembles[0];
+  $("explore-ensemble-select").value = ensemble || "";
+  if (load && ensemble) exploreBundleChanged();
 }
 function exploreBundleChanged() {
   const dataset = state.catalog.datasets.find((item) => item.dataset === $("explore-dataset-select").value);
@@ -141,17 +178,104 @@ function exploreBundleChanged() {
   reset($("ensemble-select"));
   run.ensembles.forEach((item) => option($("ensemble-select"), item));
   $("ensemble-select").value = ensemble;
+  selectPipeline(pipelineForEnsemble(ensemble), false);
   loadBundle().catch(showError);
 }
 function drawFidelitySeries(canvasId, ks, values, color) { const canvas = $(canvasId); const { ctx, width, height } = setupCanvas(canvas, 260); const plot = { left: 66, top: 25, right: 16, bottom: 52 }; const xFor = (i) => plot.left + i * ((width - plot.left - plot.right) / Math.max(1, ks.length - 1)); const yFor = (v) => height - plot.bottom - Math.max(0, Math.min(1, v)) * (height - plot.top - plot.bottom); ctx.clearRect(0, 0, width, height); ctx.font = "10px Inter, sans-serif"; for (let tick = 0; tick <= 4; tick += 1) { const y = yFor(tick / 4); ctx.strokeStyle = "rgba(0,0,0,.07)"; ctx.beginPath(); ctx.moveTo(plot.left, y); ctx.lineTo(width - plot.right, y); ctx.stroke(); ctx.fillStyle = "#8c8c91"; ctx.fillText((tick / 4).toFixed(2), 25, y + 4); } ctx.beginPath(); values.forEach((value, index) => { const x = xFor(index), y = yFor(value); index ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.stroke(); values.forEach((value, index) => { const x = xFor(index), y = yFor(value); ctx.beginPath(); ctx.fillStyle = color; ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = "#8c8c91"; ctx.fillText(String(ks[index]), x - 4, height - 30); }); ctx.fillStyle = "#6e6e73"; ctx.textAlign = "center"; ctx.fillText("Number of joints (k)", (plot.left + width - plot.right) / 2, height - 8); ctx.save(); ctx.translate(12, (plot.top + height - plot.bottom) / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("True-class confidence", 0, 0); ctx.restore(); ctx.textAlign = "start"; }
-function drawFidelity() { const aggregate = state.fidelity.aggregate, ks = state.fidelity.k_values, base = aggregate.base_confidence_mean; const deletion = [base].concat(ks.map((k) => base - aggregate.deletion_drop_mean[String(k)])); const insertion = [0].concat(ks.map((k) => aggregate.insertion_retention_mean[String(k)] * base)); $("deletion-title").textContent = "Aggregate deletion"; $("insertion-title").textContent = "Aggregate insertion"; drawFidelitySeries("deletion-canvas", [0].concat(ks), deletion, "#ff375f"); drawFidelitySeries("insertion-canvas", [0].concat(ks), insertion, "#34c759"); }
-function showMedia(mode) { mediaState.mode = mode; const gif = mode === "gif"; $("gif-image").style.display = gif ? "block" : "none"; $("static-image").style.display = gif ? "none" : "block"; $("gif-toggle").classList.toggle("active", gif); $("png-toggle").classList.toggle("active", !gif); $("media-open-link").href = gif ? mediaState.gif : mediaState.png; }
-function setView(view) { document.querySelectorAll(".side-nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view)); document.querySelectorAll(".view-panel").forEach((panel) => panel.classList.toggle("active", panel.id === `${view}-view`)); document.body.classList.toggle("explore-active", view === "explore"); document.body.classList.toggle("home-active", view === "home"); $("breadcrumb-view").textContent = view[0].toUpperCase() + view.slice(1); }
+function drawFidelity() { const fidelity = state.fidelity || {}, aggregate = fidelity.aggregate || {}, ks = fidelity.k_values || [], base = Number(aggregate.base_confidence_mean); $("deletion-title").textContent = "Aggregate deletion"; $("insertion-title").textContent = "Aggregate insertion"; if (!ks.length || !Number.isFinite(base)) { for (const id of ["deletion-canvas", "insertion-canvas"]) { const canvas = $(id), { ctx, width, height } = setupCanvas(canvas, 260); ctx.clearRect(0, 0, width, height); ctx.fillStyle = "#8c8c91"; ctx.font = "12px Inter, sans-serif"; ctx.textAlign = "center"; ctx.fillText("Fidelity data unavailable", width / 2, height / 2); ctx.textAlign = "start"; } return; } const deletion = [base].concat(ks.map((k) => base - Number(aggregate.deletion_drop_mean?.[String(k)] || 0))); const insertion = [0].concat(ks.map((k) => Number(aggregate.insertion_retention_mean?.[String(k)] || 0) * base)); drawFidelitySeries("deletion-canvas", [0].concat(ks), deletion, "#ff375f"); drawFidelitySeries("insertion-canvas", [0].concat(ks), insertion, "#34c759"); }
+function showMedia(mode) { mediaState.mode = mode; const gif = mode === "gif", image = $(gif ? "gif-image" : "static-image"), url = gif ? mediaState.gif : mediaState.png, link = $("media-open-link"); $("gif-image").style.display = gif ? "block" : "none"; $("static-image").style.display = gif ? "none" : "block"; $("gif-toggle").classList.toggle("active", gif); $("png-toggle").classList.toggle("active", !gif); link.href = url || "#"; link.setAttribute("aria-disabled", String(!url)); link.tabIndex = url ? 0 : -1; image.alt = url ? (gif ? "Animated XAI explanation" : "Peak frame XAI explanation") : "No explanation media available"; }
+function setView(view) { document.querySelectorAll(".side-nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view)); document.querySelectorAll(".view-panel").forEach((panel) => panel.classList.toggle("active", panel.id === `${view}-view`)); document.body.classList.toggle("explore-active", view === "explore"); document.body.classList.toggle("home-active", view === "home"); $("breadcrumb-view").textContent = view[0].toUpperCase() + view.slice(1); requestAnimationFrame(() => { if (view === "home") drawBenchmarkChart(); if (view === "validation" && state.fidelity) drawFidelity(); if ((view === "overview" || view === "explain") && state.heatmap) { const body = Number($("body-select").value), frames = state.heatmap.values?.[body] || []; if (frames.length) { const frame = frames.reduce((best, values, index) => values.reduce((sum, value) => sum + Number(value || 0), 0) > best.value ? { index, value: values.reduce((sum, value) => sum + Number(value || 0), 0) } : best, { index: 0, value: -Infinity }).index; drawSkeleton(state.heatmap, body, frame); drawTemporal(state.heatmap, body, frame); } } }); }
 function populateSample(sample) { const detail = state.semanticDetails?.samples?.find((item) => item.sample_id === sample.sample_id); const predictedAction = sample.predicted_action || "Prediction unavailable"; const trueAction = sample.true_action || detail?.action_label || "Unknown action"; const actionIndex = sample.true_label ?? detail?.action_idx ?? sample.predicted_label; const classLabel = actionIndex === undefined || actionIndex === null ? "Unavailable" : `Class ${Number(actionIndex)}`; const hasConfidence = Number.isFinite(Number(sample.predicted_confidence)); const confidence = hasConfidence ? sample.predicted_confidence : 0; $("sample-title").textContent = sample.sample_id; $("confidence-badge").textContent = hasConfidence ? `${formatPercent(confidence)} confidence` : "Confidence unavailable"; $("prediction-content").innerHTML = `<p class="prediction-label">Predicted action</p><p class="prediction-name">${predictedAction}</p><p class="prediction-meta">True label: <strong>${trueAction}</strong> · ${classLabel}</p>`; $("insight-content").innerHTML = `<div class="insight-row"><span>Prediction</span><strong>${predictedAction}</strong></div><div class="insight-row"><span>Ground truth</span><strong>${trueAction}</strong></div><div class="insight-row"><span>Class</span><strong>${classLabel}</strong></div><div class="insight-row"><span>Confidence</span><strong>${hasConfidence ? formatPercent(confidence) : "Unavailable"}</strong></div><div class="insight-row"><span>Heatmap shape</span><strong>${(sample.heatmap_shape || []).join(" × ") || "Unavailable"}</strong></div>`; }
-async function loadSample() { const sample = selectedSample(); if (!sample) return; state.heatmap = await getJson(`${state.bundle}/${sample.heatmap}`); const body = Number($("body-select").value); const frames = state.heatmap.values[body] || []; const frame = frames.reduce((best, current, index) => { const value = current.reduce((sum, item) => sum + item, 0); return value > best.value ? { index, value } : best; }, { index: 0, value: -Infinity }).index; $("frame-label").textContent = `Peak frame ${frame}`; $("frame-badge").textContent = `Peak frame ${frame}`; populateSample(sample); drawSkeleton(state.heatmap, body, frame); drawTemporal(state.heatmap, body, frame); mediaState.gif = `${state.bundle}/${sample.gif}`; mediaState.png = `${state.bundle}/${sample.static_image}`; $("gif-image").src = mediaState.gif; $("static-image").src = mediaState.png; showMedia(mediaState.mode); }
-async function loadBundle() { const dataset = $("dataset-select").value, run = $("run-select").value, ensemble = $("ensemble-select").value; state.bundle = bundlePath(dataset, run, ensemble); const detailsPath = `${state.bundle}/semantic/semantic_details.json`; [state.manifest, state.fidelity, state.semantic] = await Promise.all([getJson(`${state.bundle}/explanation_manifest.json`), getJson(`${state.bundle}/fidelity/fidelity_results.json`), getJson(`${state.bundle}/semantic/semantic_results.json`)]); state.semanticDetails = await getJson(detailsPath).catch(() => null); reset($("sample-select")); state.manifest.samples.forEach((sample) => { const detail = state.semanticDetails?.samples?.find((item) => item.sample_id === sample.sample_id); const activity = sample.true_action || sample.predicted_action || detail?.action_label || "Unknown activity"; option($("sample-select"), sample.sample_id, `${activity} · ${sample.sample_id}`); }); $("dataset-badge").textContent = dataset.toUpperCase(); $("hero-experiment").textContent = `${dataset} · ${ensemble}`; drawSemantic(); drawExplore(); populateExploreSelectors(); $("experiment-details").innerHTML = `<div class="detail-row"><span>Dataset</span><strong>${dataset}</strong></div><div class="detail-row"><span>Run</span><strong>${run}</strong></div><div class="detail-row"><span>Ensemble</span><strong>${ensemble}</strong></div><div class="detail-row"><span>Samples evaluated</span><strong>${state.manifest.samples.length}</strong></div>`; drawFidelity(); await loadSample(); }
-function updateRuns() { const dataset = state.catalog.datasets.find((item) => item.dataset === $("dataset-select").value); reset($("run-select")); dataset.runs.forEach((run) => option($("run-select"), run.run_id)); updateEnsembles(); }
-function updateEnsembles() { const dataset = state.catalog.datasets.find((item) => item.dataset === $("dataset-select").value), run = dataset.runs.find((item) => item.run_id === $("run-select").value); reset($("ensemble-select")); run.ensembles.forEach((ensemble) => option($("ensemble-select"), ensemble)); loadBundle().catch(showError); }
-function showError(error) { $("bundle-status").textContent = "Unable to load results"; $("sidebar-status").textContent = "Check result bundle"; $("toast").textContent = error.message; $("toast").classList.add("show"); setTimeout(() => $("toast").classList.remove("show"), 4000); }
-async function start() { try { state.catalog = await getJson("results/catalog.json"); reset($("dataset-select")); state.catalog.datasets.forEach((dataset) => option($("dataset-select"), dataset.dataset)); $("dataset-select").onchange = updateRuns; $("run-select").onchange = updateEnsembles; $("ensemble-select").onchange = () => loadBundle().catch(showError); $("sample-select").onchange = () => loadSample().catch(showError); $("body-select").onchange = () => loadSample().catch(showError); $("semantic-sample-select").onchange = renderSemanticSample; $("explore-dataset-select").onchange = populateExploreSelectors; $("explore-run-select").onchange = populateExploreSelectors; $("explore-ensemble-select").onchange = exploreBundleChanged; $("open-explore-button").onclick = () => setView("explore"); $("back-validation-button").onclick = () => setView("validation"); $("refresh-button").onclick = () => loadBundle().then(() => { $("bundle-status").textContent = "Results refreshed"; }).catch(showError); document.querySelectorAll(".side-nav-item").forEach((item) => item.onclick = () => setView(item.dataset.view)); document.querySelectorAll(".pipeline-row").forEach((row) => row.onclick = () => selectPipeline(row.dataset.pipeline)); document.querySelectorAll(".architecture-node").forEach((node) => node.onclick = () => selectArchitectureBlock(node.dataset.architecture)); $("heatmap-canvas").addEventListener("mousemove", updateHeatmapTooltip); $("heatmap-canvas").addEventListener("mouseleave", hideHeatmapTooltip); $("gif-toggle").onclick = () => showMedia("gif"); $("png-toggle").onclick = () => showMedia("png"); updateRuns(); selectPipeline("jbv"); selectArchitectureBlock("input"); drawBenchmarkChart(); setView("home"); $("bundle-status").textContent = "Results loaded"; $("sidebar-status").textContent = `${state.manifest?.samples.length || 0} samples available`; } catch (error) { showError(error); } }
+async function loadSample() {
+  const sample = selectedSample(), bundle = state.bundle, requestId = ++state.sampleRequest;
+  if (!sample || !bundle || !sample.heatmap) return;
+  let heatmap;
+  try { heatmap = await getJson(`${bundle}/${sample.heatmap}`); }
+  catch (error) { if (requestId !== state.sampleRequest) return; throw error; }
+  if (requestId !== state.sampleRequest || bundle !== state.bundle || sample.sample_id !== $('sample-select').value) return;
+  state.heatmap = heatmap;
+  const body = Number($('body-select').value), frames = heatmap.values?.[body] || [];
+  const frame = frames.reduce((best, current, index) => { const value = current.reduce((sum, item) => sum + Number(item || 0), 0); return value > best.value ? { index, value } : best; }, { index: 0, value: -Infinity }).index;
+  $('frame-label').textContent = frames.length ? `Peak frame ${frame}` : 'No frame data';
+  $('frame-badge').textContent = frames.length ? `Peak frame ${frame}` : 'No frame data';
+  populateSample(sample);
+  if (frames.length) { drawSkeleton(heatmap, body, frame); drawTemporal(heatmap, body, frame); }
+  mediaState.gif = sample.gif ? `${bundle}/${sample.gif}` : '';
+  mediaState.png = sample.static_image ? `${bundle}/${sample.static_image}` : '';
+  $('gif-image').src = mediaState.gif; $('static-image').src = mediaState.png; showMedia(mediaState.mode);
+}
+async function loadBundle() {
+  const dataset = $('dataset-select').value, run = $('run-select').value, ensemble = $('ensemble-select').value;
+  if (!dataset || !run || !ensemble) throw new Error('Choose a dataset, run, and ensemble with published results.');
+  const requestId = ++state.bundleRequest, bundle = bundlePath(dataset, run, ensemble), detailsPath = `${bundle}/semantic/semantic_details.json`;
+  state.sampleRequest++;
+  $('bundle-status').textContent = 'Loading selected results…';
+  let manifest, fidelity, semantic, semanticDetails;
+  try {
+    [manifest, fidelity, semantic, semanticDetails] = await Promise.all([
+      getJson(`${bundle}/explanation_manifest.json`), getJson(`${bundle}/fidelity/fidelity_results.json`),
+      getJson(`${bundle}/semantic/semantic_results.json`), getJson(detailsPath).catch(() => null),
+    ]);
+  } catch (error) { if (requestId !== state.bundleRequest) return; throw error; }
+  if (requestId !== state.bundleRequest || bundle !== bundlePath($('dataset-select').value, $('run-select').value, $('ensemble-select').value)) return;
+  const previousSample = $('sample-select').value;
+  state.bundle = bundle; state.manifest = manifest; state.fidelity = fidelity; state.semantic = semantic; state.semanticDetails = semanticDetails;
+  reset($('sample-select'));
+  const samples = manifest.samples || [];
+  samples.forEach((sample) => { const detail = semanticDetails?.samples?.find((item) => item.sample_id === sample.sample_id); const activity = sample.true_action || sample.predicted_action || detail?.action_label || 'Unknown activity'; option($('sample-select'), sample.sample_id, `${activity} · ${sample.sample_id}`); });
+  if (samples.some((sample) => sample.sample_id === previousSample)) $('sample-select').value = previousSample;
+  $('sample-select').disabled = samples.length === 0;
+  $('dataset-badge').textContent = dataset.toUpperCase(); $('hero-experiment').textContent = `${dataset} · ${ensemble}`;
+  drawSemantic(); drawExplore(); populateExploreSelectors();
+  $('experiment-details').innerHTML = `<div class="detail-row"><span>Dataset</span><strong>${dataset}</strong></div><div class="detail-row"><span>Run</span><strong>${run}</strong></div><div class="detail-row"><span>Ensemble</span><strong>${ensemble}</strong></div><div class="detail-row"><span>Samples evaluated</span><strong>${samples.length}</strong></div>`;
+  drawFidelity(); $('bundle-status').textContent = 'Results loaded'; $('sidebar-status').textContent = `${samples.length} samples available`;
+  if (samples.length) await loadSample(); else { state.heatmap = null; $('sample-title').textContent = 'No samples available'; $('prediction-content').innerHTML = '<p class="empty-state">This result bundle has no samples to display.</p>'; }
+}
+function updateRuns() {
+  const dataset = state.catalog?.datasets.find((item) => item.dataset === $('dataset-select').value);
+  reset($('run-select')); (dataset?.runs || []).forEach((run) => option($('run-select'), run.run_id)); $('run-select').disabled = !dataset?.runs.length;
+  updateEnsembles();
+}
+function updateEnsembles() {
+  const dataset = state.catalog?.datasets.find((item) => item.dataset === $('dataset-select').value), run = dataset?.runs.find((item) => item.run_id === $('run-select').value);
+  reset($('ensemble-select')); (run?.ensembles || []).forEach((ensemble) => option($('ensemble-select'), ensemble)); $('ensemble-select').disabled = !run?.ensembles.length;
+  if (!run?.ensembles.length) { state.bundleRequest++; $('bundle-status').textContent = 'No result bundles available'; $('sidebar-status').textContent = 'Publish a result bundle'; return; }
+  const preferred = ensembleForPipeline(state.selectedPipeline); $('ensemble-select').value = run.ensembles.includes(preferred) ? preferred : run.ensembles[0];
+  loadBundle().catch(showError);
+}
+function showError(error) { $('bundle-status').textContent = 'Unable to load results'; $('sidebar-status').textContent = 'Check result bundle'; $('toast').textContent = error.message; $('toast').classList.add('show'); clearTimeout(showError.timer); showError.timer = setTimeout(() => $('toast').classList.remove('show'), 4000); }
+async function start() {
+  try {
+    state.catalog = await getJson('results/catalog.json');
+    const datasets = state.catalog.datasets || [];
+    if (!datasets.length) throw new Error('The result catalog contains no published datasets.');
+    reset($('dataset-select')); datasets.forEach((dataset) => option($('dataset-select'), dataset.dataset));
+    $('dataset-select').onchange = updateRuns;
+    $('run-select').onchange = updateEnsembles;
+    $('ensemble-select').onchange = () => { selectPipeline(pipelineForEnsemble($('ensemble-select').value), false); loadBundle().catch(showError); };
+    $('sample-select').onchange = () => loadSample().catch(showError);
+    $('body-select').onchange = () => loadSample().catch(showError);
+    $('semantic-sample-select').onchange = () => renderSemanticSample();
+    $('explore-dataset-select').onchange = () => updateExploreRuns('', '', true);
+    $('explore-run-select').onchange = () => updateExploreEnsembles('', true);
+    $('explore-ensemble-select').onchange = exploreBundleChanged;
+    $('open-explore-button').onclick = () => setView('explore');
+    $('back-validation-button').onclick = () => setView('validation');
+    $('refresh-button').onclick = () => { const button = $('refresh-button'); button.disabled = true; loadBundle().then(() => { $('bundle-status').textContent = 'Results refreshed'; }).catch(showError).finally(() => { button.disabled = false; }); };
+    document.querySelectorAll('.side-nav-item').forEach((item) => item.onclick = () => setView(item.dataset.view));
+    document.querySelectorAll('.pipeline-row').forEach((row) => { row.setAttribute('role', 'button'); row.setAttribute('tabindex', '0'); row.onclick = () => selectPipeline(row.dataset.pipeline); row.onkeydown = (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectPipeline(row.dataset.pipeline); } }; });
+    document.querySelectorAll('.architecture-node').forEach((node) => node.onclick = () => selectArchitectureBlock(node.dataset.architecture));
+    $('heatmap-canvas').addEventListener('mousemove', updateHeatmapTooltip);
+    $('heatmap-canvas').addEventListener('mouseleave', hideHeatmapTooltip);
+    $('gif-toggle').onclick = () => showMedia('gif'); $('png-toggle').onclick = () => showMedia('png');
+    $('gif-image').onerror = () => { mediaState.gif = ''; $('gif-image').removeAttribute('src'); if (mediaState.mode === 'gif') showMedia('gif'); };
+    $('static-image').onerror = () => { mediaState.png = ''; $('static-image').removeAttribute('src'); if (mediaState.mode === 'png') showMedia('png'); };
+    $('media-open-link').onclick = (event) => { if (event.currentTarget.getAttribute('aria-disabled') === 'true') event.preventDefault(); };
+    window.addEventListener('resize', () => { const view = document.querySelector('.view-panel.active')?.id.replace('-view', ''); if (view) setView(view); });
+    selectPipeline('jbv', false); selectArchitectureBlock('input'); drawBenchmarkChart();
+    $('dataset-select').value = datasets[0].dataset;
+    updateRuns();
+    setView('home');
+  } catch (error) { showError(error); }
+}
 start();
