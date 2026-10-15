@@ -75,7 +75,7 @@ def convert_directory(data_dir):
     loose_files = [f for f in os.listdir(data_dir) if f.endswith('.skeleton')]
     if loose_files:
         print(f"Moving {len(loose_files)} loose files into 'raw_text' folder...")
-        for f in loose_files:
+        for f in tqdm(loose_files, desc="Organizing skeletons", unit="file"):
             shutil.move(os.path.join(data_dir, f), os.path.join(raw_dir, f))
             
     file_list = [f for f in os.listdir(raw_dir) if f.endswith('.skeleton')]

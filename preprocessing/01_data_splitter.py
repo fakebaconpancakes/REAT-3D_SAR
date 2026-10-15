@@ -13,6 +13,8 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
+from tqdm import tqdm
+
 SEED = 42
 PROTOCOLS = ("xsub", "xview", "xsub120", "xset120")
 # Published sample counts before the release's missing/incomplete-skeleton exclusions.
@@ -154,7 +156,7 @@ def main() -> None:
         raise FileNotFoundError(f"No .skeleton files found in {raw_dir}")
     records = []
     seen = set()
-    for path in files:
+    for path in tqdm(files, desc="Validating raw skeletons", unit="file"):
         ids = sample_ids(path)
         if path.stem in seen:
             raise ValueError(f"Duplicate sample identifier in raw data: {path.stem}")
@@ -205,7 +207,7 @@ def main() -> None:
     try:
         for split in ("train", "val", "test"):
             (staging / f"{split}_skeletons").mkdir(parents=True)
-        for record in records:
+        for record in tqdm(records, desc="Copying verified split", unit="file"):
             destination = staging / f"{record['split']}_skeletons" / record["path"].name
             shutil.copy2(record["path"], destination)
 
