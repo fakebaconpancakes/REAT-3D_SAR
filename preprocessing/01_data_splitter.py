@@ -101,13 +101,15 @@ def validate_skeleton(path: Path) -> None:
         bodies = int(lines[cursor].strip())
         cursor += 1
         for _ in range(bodies):
-            cursor += 2  # body metadata and joint count line follows
+            # NTU format: body metadata, joint count, then one line per joint.
+            cursor += 1  # skip body metadata
             if cursor >= len(lines):
                 raise ValueError(f"Truncated body data in {path}")
             joints = int(lines[cursor].strip())
             if joints != 25:
                 raise ValueError(f"Expected 25 joints, found {joints} in {path}")
-            joint_lines = lines[cursor + 1:cursor + 1 + joints]
+            cursor += 1
+            joint_lines = lines[cursor:cursor + joints]
             if len(joint_lines) != joints:
                 raise ValueError(f"Truncated joint data in {path}")
             for joint_line in joint_lines:
@@ -115,7 +117,7 @@ def validate_skeleton(path: Path) -> None:
                 if len(coordinates) < 3:
                     raise ValueError(f"Malformed joint coordinates in {path}")
                 float(coordinates[0]); float(coordinates[1]); float(coordinates[2])
-            cursor += 1 + joints
+            cursor += joints
             if cursor > len(lines):
                 raise ValueError(f"Truncated joint data in {path}")
 
