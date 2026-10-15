@@ -19,6 +19,7 @@ from utils.pipeline_config import (
     dataset_split_path,
     result_directory,
     select_pipeline_input,
+    load_ensemble_config,
 )
 
 NTU_CLASSES = NTU_ACTION_LABELS
@@ -36,7 +37,7 @@ def action_name(label_index):
 CURRENT_DATASET = 'XSUB120'
 CURRENT_ENSEMBLE = '4-stream'     # Options: 'pure', '2-stream', '3-stream', '4-stream'
 DATASET_NAME = 'xsub120'
-RUN_ID = 'run17'
+RUN_ID = 'run18_official_v2'
 
 THESIS_CONFIGS = {
     'X-VIEW': {
@@ -65,8 +66,10 @@ THESIS_CONFIGS = {
     }
 }
 
-WEIGHTS = THESIS_CONFIGS[CURRENT_DATASET][CURRENT_ENSEMBLE]
-ACTIVE_STREAMS = [name for name, weight in WEIGHTS.items() if weight > 0.0]
+ENSEMBLE_CONFIG = load_ensemble_config(DATASET_NAME, RUN_ID)
+WEIGHTS = ENSEMBLE_CONFIG["weights"]
+ACTIVE_STREAMS = ENSEMBLE_CONFIG["composition"]
+CURRENT_ENSEMBLE = "pure" if len(ACTIVE_STREAMS) == 1 else f"{len(ACTIVE_STREAMS)}-stream"
 
 NUM_CLASSES = dataset_num_classes(DATASET_NAME)
 
@@ -162,9 +165,10 @@ for file_idx in tqdm(range(args.start, end_idx), desc="Processing XAI"):
         continue
 
     # --- A. RUN MULTI-PIPE INFERENCE ---
-    engineered_tensor, body_mask, true_label = dataset[file_idx]
+    engineered_tensor, body_mask, frame_mask, true_label = dataset[file_idx]
     tensor_input = engineered_tensor.unsqueeze(0).to(device)
     body_mask = body_mask.unsqueeze(0).to(device)
+    frame_mask = frame_mask.unsqueeze(0).to(device)
     
     B, M, T, V, C = tensor_input.shape
     
@@ -189,7 +193,9 @@ for file_idx in tqdm(range(args.start, end_idx), desc="Processing XAI"):
             
             t_inp = torch.cat([feat, trans.global_node.expand(B*M, frames, 1, 128)], dim=2)
 
-            video_rep, attention_matrix = trans(t_inp, B, M, body_mask=body_mask, return_attention=True)
+            video_rep, attention_matrix = trans(
+                t_inp, B, M, body_mask=body_mask, frame_mask=frame_mask, return_attention=True
+            )
             
             logits = cls(video_rep)
             probs = torch.softmax(logits, dim=1)

@@ -105,16 +105,17 @@ def convert_directory(data_dir):
     print(f"Successfully converted {success_count}/{total_files} files in {data_dir}")
 
 if __name__ == '__main__':
-    print("Starting NTU-RGBD 120 Data Organization & Binary PT Conversion...")
+    print("Starting NTU-RGB+D Data Organization & Binary PT Conversion...")
     
     # Modify the directories below if you have a different structure or additional datasets
     directories_to_process = [
-        "data/xsub120/train_skeletons",
-        "data/xsub120/val_skeletons",
-        "data/xsub120/test_skeletons",
-        "data/xset120/train_skeletons",
-        "data/xset120/val_skeletons",
-        "data/xset120/test_skeletons"
+        f"data/xsub_official_v2/{split}_skeletons" for split in ("train", "val", "test")
+    ] + [
+        f"data/xview_official_v2/{split}_skeletons" for split in ("train", "val", "test")
+    ] + [
+        f"data/xsub120_official_v2/{split}_skeletons" for split in ("train", "val", "test")
+    ] + [
+        f"data/xset120_official_v2/{split}_skeletons" for split in ("train", "val", "test")
     ]
     
     for directory in directories_to_process:

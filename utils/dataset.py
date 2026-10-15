@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset
 
-def engineer_physics_features(skeleton_tensor):
+def engineer_physics_features(skeleton_tensor, frame_mask=None):
     """
     Transforms raw (X,Y,Z) coordinates into explicit physics features.
     Expected input shape: (Time, Bodies=2, Joints=25, Channels=3)
@@ -24,8 +24,8 @@ def engineer_physics_features(skeleton_tensor):
     
     # Calculate height of the spine (L2 Norm)
     spine_height = torch.norm(spine_shoulder - spine_base, dim=-1, keepdim=True)
-    # Add epsilon to prevent divide-by-zero
-    spine_height = torch.clamp(spine_height, min=1e-5)
+    # Empty bodies have zero height; use unit scale so they remain all-zero.
+    spine_height = torch.where(spine_height > 1e-5, spine_height, torch.ones_like(spine_height))
     
     # Divide all coordinates by the spine height
     skeleton_tensor = skeleton_tensor / spine_height
@@ -43,7 +43,15 @@ def engineer_physics_features(skeleton_tensor):
     
     # 3. Calculate Velocity
     velocity = torch.zeros_like(skeleton_tensor)
-    velocity[:-1, :, :, :] = skeleton_tensor[1:, :, :, :] - skeleton_tensor[:-1, :, :, :]
+    if T > 1:
+        adjacent_valid = torch.ones(T - 1, dtype=torch.bool, device=skeleton_tensor.device)
+        if frame_mask is not None:
+            frame_mask = torch.as_tensor(frame_mask, dtype=torch.bool, device=skeleton_tensor.device)
+            if frame_mask.shape != (T,):
+                raise ValueError(f"frame_mask must have shape ({T},), got {tuple(frame_mask.shape)}")
+            adjacent_valid = frame_mask[:-1] & frame_mask[1:]
+        deltas = skeleton_tensor[1:] - skeleton_tensor[:-1]
+        velocity[:-1] = deltas * adjacent_valid[:, None, None, None]
 
     # Stack: Relative (3) + Bones (3) + Velocity (3) = 9 Channels
     engineered_tensor = torch.cat([skeleton_tensor, bones, velocity], dim=-1)
@@ -102,8 +110,16 @@ class NTUSkeletonDataset(Dataset):
         raw_tensor = torch.load(file_path, weights_only=True)
         raw_numpy = raw_tensor.numpy()
 
+        if raw_numpy.ndim != 4 or raw_numpy.shape[1:] != (2, 25, 3):
+            raise ValueError(f"Unexpected skeleton tensor shape for {file_name}: {raw_numpy.shape}")
         actual_frames = raw_numpy.shape[0]
+        if actual_frames <= 0:
+            raise ValueError(f"Skeleton has no frames: {file_name}")
+        if not np.isfinite(raw_numpy).all():
+            raise ValueError(f"Non-finite skeleton coordinates in {file_name}")
         standardized_tensor = np.zeros((self.max_frames, 2, 25, 3), dtype=np.float32)
+        valid_frames = min(actual_frames, self.max_frames)
+        frame_mask = torch.arange(self.max_frames) < valid_frames
 
         if actual_frames <= self.max_frames:
             standardized_tensor[:actual_frames, :, :, :] = raw_numpy
@@ -111,20 +127,16 @@ class NTUSkeletonDataset(Dataset):
             standardized_tensor = raw_numpy[:self.max_frames, :, :, :]
 
         tensor_data = torch.tensor(standardized_tensor, dtype=torch.float32)
-        engineered_data = engineer_physics_features(tensor_data)
+        engineered_data = engineer_physics_features(tensor_data, frame_mask=frame_mask)
 
         # Decoupled Body
 
         # 1. Permute to (Bodies, Time, Joints, Channels)
         engineered_data = engineered_data.permute(1, 0, 2, 3) # (Bodies=2, Time=100, Joints=25, Channels=9)
 
-        # 2. Ghost Mask for Temporal Transformer
-        M  = engineered_data.shape[0]
-        body_mask = torch.ones(M, dtype=torch.bool)
+        # True means the body/frame token is absent and should be masked.
+        body_presence = torch.sum(torch.abs(tensor_data), dim=(2, 3)) > 1e-4  # (T, M)
+        body_mask = ~body_presence.transpose(0, 1).contiguous()  # (M, T)
+        body_mask |= ~frame_mask.unsqueeze(0)
 
-        for m in range(M):
-            # if the body has any kinetic variance mark it as False (not ghost)
-            if torch.sum(torch.abs(engineered_data[m])) > 1e-4:
-                body_mask[m] = False
-
-        return engineered_data, body_mask, torch.tensor(action_label, dtype=torch.long)
+        return engineered_data, body_mask, frame_mask, torch.tensor(action_label, dtype=torch.long)

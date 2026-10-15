@@ -5,15 +5,19 @@ import pandas as pd
 from tqdm import tqdm
 from utils.dataset import NTUSkeletonDataset
 from utils.action_labels import NTU_ACTION_LABELS
-from utils.pipeline_config import dataset_split_path, result_directory
+from utils.pipeline_config import dataset_split_path, result_directory, load_ensemble_config
 
 # ==========================================
 # 0. CONFIGURATION
 # ==========================================
-CURRENT_DATASET = 'X-SUB'    
-CURRENT_ENSEMBLE = '4-stream' # Change this to test different pipelines!
-DATASET_NAME = 'xsub'
-RUN_ID = 'weights_xsub-run17'
+CURRENT_DATASET = 'XSUB120'
+DATASET_NAME = 'xsub120'
+RUN_ID = 'run18_official_v2'
+ENSEMBLE_CONFIG = load_ensemble_config(DATASET_NAME, RUN_ID)
+CURRENT_ENSEMBLE = (
+    'pure' if len(ENSEMBLE_CONFIG['composition']) == 1
+    else f"{len(ENSEMBLE_CONFIG['composition'])}-stream"
+)
 
 RESULT_DIR = result_directory(DATASET_NAME, RUN_ID, CURRENT_ENSEMBLE)
 NPY_DIR = RESULT_DIR / "xai_npy"
@@ -276,7 +280,7 @@ for file_idx in tqdm(range(len(dataset))):
     if not os.path.exists(npy_path):
         continue 
         
-    _, _, true_label = dataset[file_idx]
+    _, _, _, true_label = dataset[file_idx]
     label_idx = int(true_label.item())
     
     # Load the heatmap (Shape: 2 Bodies, 100 Frames, 25 Joints)

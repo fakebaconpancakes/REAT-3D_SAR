@@ -12,24 +12,25 @@ from utils.pipeline_config import (
     dataset_num_classes,
     dataset_split_path,
     select_pipeline_input,
+    load_ensemble_config,
 )
 
 # Fixed two-stream test evaluation.
 DATASET_NAME = 'xsub120'
-RUN_ID = 'run17'
+RUN_ID = 'run18_official_v2'
 TEST_DIR = dataset_split_path(DATASET_NAME, 'test')
 NUM_CLASSES = dataset_num_classes(DATASET_NAME)
 BATCH_SIZE = 16
-FUSION_WEIGHTS = {
-    'JBV': 0.5,
-    'B': 0.5,
-}
+STREAM_PIPELINES = {'JBV': 'jbv', 'B': 'bones', 'J': 'joints', 'V': 'velocity'}
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def load_brain(in_channels, folder_path):
+def load_brain(stream_name):
+    pipeline = STREAM_PIPELINES[stream_name]
+    in_channels = 9 if stream_name == 'JBV' else 3
+    folder_path = checkpoint_directory(DATASET_NAME, RUN_ID, pipeline)
     gcn = Spatial_GCN_Layer(in_channels=in_channels, out_channels=128).to(device)
     transformer = Temporal_Brain_Layer(
         embed_dim=128,
@@ -62,14 +63,18 @@ def load_brain(in_channels, folder_path):
 
 
 def main():
+    ensemble_config = load_ensemble_config(DATASET_NAME, RUN_ID)
+    fusion_weights = ensemble_config['weights']
     wandb.init(
         project='HAR-REAT',
-        name='EVAL-2-STREAM-FUSION',
+        name=f"EVAL-{len(ensemble_config['composition'])}-STREAM-FUSION",
         config={
-            'architecture': 'Late Fusion (9-Ch Kinematic + 3-Ch Structural)',
+            'architecture': f"Late Fusion {ensemble_config['composition']}",
             'dataset': 'NTU-RGB+D 120 X-Subject Test Set',
             'batch_size': BATCH_SIZE,
-            'fusion_weights': FUSION_WEIGHTS,
+            'fusion_weights': fusion_weights,
+            'ensemble_composition': ensemble_config['composition'],
+            'validation_accuracy': ensemble_config['validation_accuracy'],
         },
     )
 
@@ -87,22 +92,13 @@ def main():
         pin_memory=True,
     )
 
-    print('Loading two-stream architecture...')
-    experts = {
-        'JBV': load_brain(
-            9,
-            checkpoint_directory(DATASET_NAME, RUN_ID, 'jbv'),
-        ),
-        'B': load_brain(
-            3,
-            checkpoint_directory(DATASET_NAME, RUN_ID, 'bones'),
-        ),
-    }
+    print(f"Loading validation-selected {len(ensemble_config['composition'])}-stream ensemble...")
+    experts = {name: load_brain(name) for name in ensemble_config['composition']}
 
     total_samples = 0
     correct_predictions = 0
 
-    print('Running fixed two-stream ensemble evaluation...')
+    print('Running frozen validation-selected ensemble evaluation...')
     loop = tqdm(
         test_dataloader,
         total=len(test_dataloader),
@@ -111,15 +107,16 @@ def main():
     )
 
     with torch.no_grad():
-        for batched_data, body_mask, labels in loop:
+        for batched_data, body_mask, frame_mask, labels in loop:
             batched_data = batched_data.to(device)
             body_mask = body_mask.to(device)
+            frame_mask = frame_mask.to(device)
             labels = labels.to(device).long().view(-1)
 
             batch_size, bodies, frames, joints, channels = batched_data.shape
             stream_inputs = {
-                'JBV': select_pipeline_input(batched_data, 'jbv'),
-                'B': select_pipeline_input(batched_data, 'bones'),
+                name: select_pipeline_input(batched_data, STREAM_PIPELINES[name])
+                for name in ensemble_config['composition']
             }
             fused_probs = torch.zeros(
                 batch_size,
@@ -162,12 +159,13 @@ def main():
                     batch_size,
                     bodies,
                     body_mask=body_mask,
+                    frame_mask=frame_mask,
                 )
                 probabilities = torch.softmax(
                     classifier(video_representation),
                     dim=1,
                 )
-                fused_probs += FUSION_WEIGHTS[stream_name] * probabilities
+                fused_probs += fusion_weights[stream_name] * probabilities
 
             predicted_classes = torch.argmax(fused_probs, dim=1)
             correct_predictions += torch.eq(
@@ -188,7 +186,7 @@ def main():
     wandb.finish()
 
     print('\n' + '=' * 50)
-    print('2-STREAM ENSEMBLE EVALUATION COMPLETE')
+    print('ENSEMBLE TEST EVALUATION COMPLETE')
     print(f'Total Unseen Videos Processed: {total_samples}')
     print(f'Final Top-1 Accuracy:          {accuracy:.2f}%')
     print('=' * 50)

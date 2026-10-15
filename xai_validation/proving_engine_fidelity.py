@@ -15,6 +15,7 @@ from utils.pipeline_config import (
     dataset_split_path,
     result_directory,
     select_pipeline_input,
+    load_ensemble_config,
 )
 
 # ==========================================
@@ -23,7 +24,7 @@ from utils.pipeline_config import (
 CURRENT_DATASET = 'XSUB120'
 CURRENT_ENSEMBLE = '2-stream' 
 DATASET_NAME = 'xsub120'
-RUN_ID = 'run17'
+RUN_ID = 'run18_official_v2'
 
 THESIS_CONFIGS = {
     'X-VIEW': {
@@ -52,8 +53,10 @@ THESIS_CONFIGS = {
     }
 }
 
-WEIGHTS = THESIS_CONFIGS[CURRENT_DATASET][CURRENT_ENSEMBLE]
-ACTIVE_STREAMS = [name for name, weight in WEIGHTS.items() if weight > 0.0]
+ENSEMBLE_CONFIG = load_ensemble_config(DATASET_NAME, RUN_ID)
+WEIGHTS = ENSEMBLE_CONFIG["weights"]
+ACTIVE_STREAMS = ENSEMBLE_CONFIG["composition"]
+CURRENT_ENSEMBLE = "pure" if len(ACTIVE_STREAMS) == 1 else f"{len(ACTIVE_STREAMS)}-stream"
 NUM_CLASSES = dataset_num_classes(DATASET_NAME)
 RESULT_DIR = result_directory(DATASET_NAME, RUN_ID, CURRENT_ENSEMBLE)
 NPY_DIR = RESULT_DIR / "xai_npy"
@@ -94,7 +97,7 @@ if 'V' in ACTIVE_STREAMS:   experts['V']   = load_expert(3, 'pure_velocity')
 # ==========================================
 # 2. INFERENCE FUNCTION
 # ==========================================
-def get_ensemble_confidence(tensor_input, body_mask, target_label):
+def get_ensemble_confidence(tensor_input, body_mask, frame_mask, target_label):
     """Runs the 9-channel tensor through the active ensemble and returns confidence of the TRUE label."""
     B, M, T, V, C = tensor_input.shape
     slices = {
@@ -113,7 +116,9 @@ def get_ensemble_confidence(tensor_input, body_mask, target_label):
             feat = gcn(inp)
             frames = feat.shape[1]
             t_inp = torch.cat([feat, trans.global_node.expand(B*M, frames, 1, 128)], dim=2)
-            video_rep = trans(t_inp, B, M, body_mask=body_mask, return_attention=False)
+            video_rep = trans(
+                t_inp, B, M, body_mask=body_mask, frame_mask=frame_mask, return_attention=False
+            )
             probs = torch.softmax(cls(video_rep), dim=1)
             fused_probs += WEIGHTS[name] * probs 
             
@@ -137,13 +142,14 @@ for file_idx in tqdm(range(len(dataset))):
     if not os.path.exists(npy_path):
         continue # Only evaluate videos that have XAI heatmaps generated
         
-    engineered_tensor, body_mask, true_label = dataset[file_idx]
+    engineered_tensor, body_mask, frame_mask, true_label = dataset[file_idx]
     tensor_input = engineered_tensor.unsqueeze(0).to(device)
     body_mask = body_mask.unsqueeze(0).to(device)
+    frame_mask = frame_mask.unsqueeze(0).to(device)
     label_idx = true_label.item()
     
     # 1. Base Confidence (No Masking)
-    base_conf = get_ensemble_confidence(tensor_input, body_mask, label_idx)
+    base_conf = get_ensemble_confidence(tensor_input, body_mask, frame_mask, label_idx)
     
     # 2. Rank Joints by XAI Importance
     heatmaps = np.load(npy_path) # Shape: (2, 100, 25)
@@ -171,8 +177,8 @@ for file_idx in tqdm(range(len(dataset))):
                     # Insertion: non-important joints remain 0.0
                     
         # Calculate new confidences
-        del_conf = get_ensemble_confidence(del_tensor, body_mask, label_idx)
-        ins_conf = get_ensemble_confidence(ins_tensor, body_mask, label_idx)
+        del_conf = get_ensemble_confidence(del_tensor, body_mask, frame_mask, label_idx)
+        ins_conf = get_ensemble_confidence(ins_tensor, body_mask, frame_mask, label_idx)
         
         video_metrics[f'del_k{k}'] = del_conf
         video_metrics[f'ins_k{k}'] = ins_conf

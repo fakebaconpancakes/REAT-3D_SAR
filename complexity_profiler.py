@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import time
 
 try:
     from thop import profile, clever_format
@@ -12,10 +13,11 @@ from models.temporal_brain import Temporal_Brain_Layer
 
 
 class REAT_Model(nn.Module):
-    def __init__(self, in_channels=9): # <-- Added dynamic channel arg
+    def __init__(self, in_channels=9, num_classes=120):
         super().__init__()
         self.gcn = Spatial_GCN_Layer(in_channels=in_channels, out_channels=128)
         self.transformer = Temporal_Brain_Layer(embed_dim=128, num_heads=4, max_frames=100, max_bodies=2)
+        self.classifier = nn.Linear(128, num_classes)
 
     def forward(self, x):
         B, M, T, V, C = x.shape
@@ -26,7 +28,7 @@ class REAT_Model(nn.Module):
         global_node_expanded = self.transformer.global_node.expand(B * M, frames, 1, 128)
         transformer_input = torch.cat([gcn_features, global_node_expanded], dim=2)
         
-        return self.transformer(transformer_input, B, M)
+        return self.classifier(self.transformer(transformer_input, B, M))
 
 
 def count_trainable_params(model):
@@ -54,6 +56,18 @@ def _spatial_mask_pairs(room_map, global_idx):
             if is_global_q or is_global_kv or same_room:
                 total_pairs += 1
     return total_pairs
+
+
+def _temporal_window_pairs(num_bodies, num_frames, window_size=5):
+    per_body_pair = sum(
+        1
+        for query_time in range(num_frames)
+        for key_time in range(num_frames)
+        if abs(query_time - key_time) <= window_size
+    )
+    body_pairs = num_bodies * num_bodies * per_body_pair
+    video_token_pairs = 2 * num_bodies * num_frames + 1
+    return body_pairs + video_token_pairs
 
 
 def estimate_reat_macs(model, x_shape):
@@ -86,12 +100,12 @@ def estimate_reat_macs(model, x_shape):
     tokens_temporal = B * L 
     
     macs_temporal_qkv = _linear_macs(tokens_temporal, E, 3 * E)
-    
-    dense_pairs = L * L
-    macs_temporal_attn = B * H * dense_pairs * (2 * d)
+    temporal_pairs = _temporal_window_pairs(M, T, window_size=5)
+    macs_temporal_attn = B * H * temporal_pairs * (2 * d)
     
     macs_temporal_out = _linear_macs(tokens_temporal, E, E)
     macs_temporal_ffn = _ffn_macs(tokens_temporal, E, expansion=4)
+    macs_classifier = _linear_macs(B, E, model.classifier.out_features)
 
     total_macs = (
         macs_gcn_linear
@@ -104,6 +118,7 @@ def estimate_reat_macs(model, x_shape):
         + macs_temporal_attn
         + macs_temporal_out
         + macs_temporal_ffn
+        + macs_classifier
     )
 
     return {
@@ -116,10 +131,39 @@ def estimate_reat_macs(model, x_shape):
             "spatial_out_proj": macs_spatial_out,
             "spatial_ffn": macs_spatial_ffn,
             "temporal_qkv_proj": macs_temporal_qkv,
-            "temporal_attention_dense": macs_temporal_attn,
+            "temporal_attention_windowed": macs_temporal_attn,
             "temporal_out_proj": macs_temporal_out,
             "temporal_ffn": macs_temporal_ffn,
+            "classification_head": macs_classifier,
         },
+    }
+
+
+def benchmark_inference(model, input_tensor, device, warmup=5, repeats=20):
+    model.eval()
+    with torch.inference_mode():
+        for _ in range(warmup):
+            model(input_tensor)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        durations = []
+        for _ in range(repeats):
+            start = time.perf_counter()
+            model(input_tensor)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            durations.append(time.perf_counter() - start)
+    latency_ms = 1000.0 * sum(durations) / len(durations)
+    return {
+        "mean_latency_ms": latency_ms,
+        "samples_per_second": input_tensor.shape[0] * 1000.0 / latency_ms,
+        "cuda_peak_allocated_mb": (
+            torch.cuda.max_memory_allocated(device) / (1024**2)
+            if device.type == "cuda" else None
+        ),
+        "warmup_iterations": warmup,
+        "measurement_iterations": repeats,
     }
 
 
@@ -150,7 +194,7 @@ def main():
     print("=" * 70)
     print("  REAT ENSEMBLE COMPLEXITY REPORT (Analytic) ")
     print("=" * 70)
-    print(f"{'Ensemble Type':<25} | {'Total Params':<15} | {'Total MACs (FLOPs/2)'}")
+    print(f"{'Ensemble Type':<25} | {'Total Params':<15} | {'Analytic MACs'}")
     print("-" * 70)
 
     # 4. Calculate and display aggregated totals
@@ -175,6 +219,19 @@ def main():
         print(f"THOP MACs (9ch):            {thop_macs_str}")
         print(f"Analytic vs THOP Discrepancy: {int(delta):,} ({delta_pct:.2f}%)")
         print("-" * 70)
+
+    print("\nAnalytic MAC estimates count allowed masked attention pairs and include the classifier.")
+    print("They exclude bias, normalization, softmax, activation, and data movement; 2x MAC is only a FLOP convention.")
+    print("Runtime kernels may execute padding or sparse blocks differently, so this is not a hardware operation measurement.")
+    print("GPU timing and peak allocation are measured separately:")
+    benchmark_input = torch.randn(1, 2, 100, 25, 9, device=device)
+    benchmark = benchmark_inference(model_9ch, benchmark_input, device)
+    print(f"Mean latency: {benchmark['mean_latency_ms']:.3f} ms/sample batch")
+    print(f"Throughput: {benchmark['samples_per_second']:.2f} samples/s")
+    if benchmark["cuda_peak_allocated_mb"] is not None:
+        print(f"CUDA peak allocated memory: {benchmark['cuda_peak_allocated_mb']:.2f} MiB")
+    else:
+        print("CUDA peak memory: unavailable on CPU; run this profiler on CUDA for GPU memory figures.")
 
 
 if __name__ == "__main__":

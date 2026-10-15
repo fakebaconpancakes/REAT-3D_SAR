@@ -13,19 +13,20 @@ from utils.pipeline_config import (
     dataset_num_classes,
     dataset_split_path,
     select_pipeline_input,
+    save_ensemble_config,
 )
 
 # 1. HARDWARE & INIT
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DATASET_NAME = 'xsub120'
-RUN_ID = 'run17'
-TEST_DIR = dataset_split_path(DATASET_NAME, 'test')
+RUN_ID = 'run18_official_v2'
+VAL_DIR = dataset_split_path(DATASET_NAME, 'val')
 BATCH_SIZE = 16
 NUM_CLASSES = dataset_num_classes(DATASET_NAME)
 
-print("Loading Test Data..")
-test_dataset = NTUSkeletonDataset(data_folder=TEST_DIR, max_frames=100)
-test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True)
+print("Loading Validation Data..")
+val_dataset = NTUSkeletonDataset(data_folder=VAL_DIR, max_frames=100)
+val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True)
 
 # 2. HELPER TO LOAD A BRAIN
 def load_brain(in_channels, folder_path):
@@ -62,12 +63,15 @@ brain_v = load_brain(
 all_labels = []
 all_probs = {'JBV': [], 'B': [], 'J': [], 'V': []}
 
-loop = tqdm(test_dataloader, total=len(test_dataloader), desc="Extracting Brain Confidences")
+loop = tqdm(val_dataloader, total=len(val_dataloader), desc="Extracting Validation Brain Confidences")
 with torch.no_grad():
-    for batched_data, body_mask, labels in loop:
+    for batched_data, body_mask, frame_mask, labels in loop:
         batched_data = batched_data.to(device)
         body_mask = body_mask.to(device)
+        frame_mask = frame_mask.to(device)
         all_labels.extend(labels.numpy())
+
+        # Each stream is inferred from this shared batch, keeping predictions aligned by sample.
 
         B, M, T, V, C = batched_data.shape
         
@@ -87,7 +91,7 @@ with torch.no_grad():
             feat = gcn(inp)
             frames = feat.shape[1]
             t_inp = torch.cat([feat, trans.global_node.expand(B*M, frames, 1, 128)], dim=2)
-            vid_rep = trans(t_inp, B, M, body_mask=body_mask)
+            vid_rep = trans(t_inp, B, M, body_mask=body_mask, frame_mask=frame_mask)
             logits = cls(vid_rep)
             probs = torch.softmax(logits, dim=1)
             all_probs[name].append(probs.cpu().numpy())
@@ -96,6 +100,8 @@ with torch.no_grad():
 for k in all_probs.keys():
     all_probs[k] = np.concatenate(all_probs[k], axis=0)
 all_labels = np.array(all_labels)
+if len(all_labels) != len(val_dataset) or any(len(probabilities) != len(all_labels) for probabilities in all_probs.values()):
+    raise RuntimeError("Validation predictions are not aligned sample-for-sample")
 
 # 4. GRID SEARCH ENGINE
 def find_optimal_fusion(model_names, step=0.05):
@@ -127,7 +133,7 @@ def find_optimal_fusion(model_names, step=0.05):
         preds = np.argmax(fused, axis=1)
         acc = np.mean(preds == all_labels) * 100
         
-        if acc > best_acc:
+        if best_weights is None or acc > best_acc:
             best_acc = acc
             best_weights = weights
             
@@ -135,25 +141,49 @@ def find_optimal_fusion(model_names, step=0.05):
     weight_str = " : ".join([f"{n}({w*100:.0f}%)" for n, w in zip(model_names, best_weights)])
     print(f"⭐ {best_acc:.2f}%  |  {weight_str}")
 
+    return best_acc, dict(zip(model_names, map(float, best_weights)))
+
+
 # 5. EXECUTE YOUR ABLATION STUDY
 print("\n" + "=" * 60)
 print("🏆 REAT MASTER ABLATION FUSION RESULTS 🏆")
 print("=" * 60)
 
+best_overall = None
+
+
+def report_candidate(model_names):
+    global best_overall
+    accuracy, weights = find_optimal_fusion(model_names)
+    if best_overall is None or accuracy > best_overall["accuracy"]:
+        best_overall = {"accuracy": accuracy, "composition": model_names, "weights": weights}
+
+
 print("\n--- 2-Stream Fusions ---")
-find_optimal_fusion(['JBV', 'J'])
-find_optimal_fusion(['JBV', 'V'])
-find_optimal_fusion(['JBV', 'B'])
-find_optimal_fusion(['B', 'J'])
-find_optimal_fusion(['B', 'V'])
-find_optimal_fusion(['J', 'V'])
+report_candidate(['JBV', 'J'])
+report_candidate(['JBV', 'V'])
+report_candidate(['JBV', 'B'])
+report_candidate(['B', 'J'])
+report_candidate(['B', 'V'])
+report_candidate(['J', 'V'])
 
 print("\n--- 3-Stream Fusions ---")
-find_optimal_fusion(['B', 'J', 'V'])
-find_optimal_fusion(['JBV', 'B', 'J'])
-find_optimal_fusion(['JBV', 'B', 'V'])
-find_optimal_fusion(['JBV', 'J', 'V'])
+report_candidate(['B', 'J', 'V'])
+report_candidate(['JBV', 'B', 'J'])
+report_candidate(['JBV', 'B', 'V'])
+report_candidate(['JBV', 'J', 'V'])
 
 print("\n--- 4-Stream Fusion ---")
-find_optimal_fusion(['JBV', 'B', 'J', 'V'])
+report_candidate(['JBV', 'B', 'J', 'V'])
+if best_overall is None:
+    raise RuntimeError("No validation ensemble candidates were evaluated")
+config_path = save_ensemble_config(
+    DATASET_NAME,
+    RUN_ID,
+    best_overall["composition"],
+    best_overall["weights"],
+    best_overall["accuracy"],
+)
+print(f"Best validation composition: {best_overall['composition']}")
+print(f"Saved validation-selected ensemble config: {config_path}")
 print("=" * 60)

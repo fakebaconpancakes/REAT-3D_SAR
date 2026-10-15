@@ -114,7 +114,7 @@ class Temporal_Brain_Layer(nn.Module):
             block_mask=self._cached_block_mask,
         )
 
-    def forward(self, x, B, M, body_mask=None, return_attention=False):
+    def forward(self, x, B, M, body_mask=None, frame_mask=None, return_attention=False):
         # x -> shape: (B*M, Time, 26, Embed_Dim)
         B_M, T, S, E = x.shape
 
@@ -154,9 +154,26 @@ class Temporal_Brain_Layer(nn.Module):
         x_temporal = torch.cat([video_token_expanded, x_temporal], dim=1)
 
         # 5. Handle the ghost mask 
-        if body_mask is not None:
-            # body_mask is (B, M) -> expand to (B, M, T) to cover time
-            expanded_mask = body_mask.unsqueeze(-1).expand(B, M, T).reshape(B, M*T)
+        if body_mask is not None or frame_mask is not None:
+            if body_mask is None:
+                expanded_mask = torch.zeros(B, M, T, dtype=torch.bool, device=x.device)
+            else:
+                body_mask = body_mask.to(device=x.device, dtype=torch.bool)
+                if body_mask.shape == (B, M):
+                    expanded_mask = body_mask.unsqueeze(-1).expand(B, M, T)
+                elif body_mask.shape == (B, M, T):
+                    expanded_mask = body_mask
+                else:
+                    raise ValueError(
+                        f"body_mask must have shape ({B}, {M}) or ({B}, {M}, {T}), "
+                        f"got {tuple(body_mask.shape)}"
+                    )
+            if frame_mask is not None:
+                frame_mask = frame_mask.to(device=x.device, dtype=torch.bool)
+                if frame_mask.shape != (B, T):
+                    raise ValueError(f"frame_mask must have shape ({B}, {T}), got {tuple(frame_mask.shape)}")
+                expanded_mask = expanded_mask | ~frame_mask[:, None, :]
+            expanded_mask = expanded_mask.reshape(B, M*T)
             # Temporal token is always real, so mask is false for it
             ceo_mask = torch.zeros(B, 1, dtype=torch.bool, device=x.device)
             # final mask shape: (B, 1+M*T)

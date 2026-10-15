@@ -13,6 +13,7 @@ from utils.pipeline_config import (
     dataset_num_classes,
     dataset_split_path,
     select_pipeline_input,
+    save_ensemble_config,
 )
 
 # 1. HARDWARE
@@ -22,8 +23,8 @@ print(f"Device in-use: {device.type.upper()}")
 # 2. INITIALIZATION
 # IMPORTANT: Use the validation set to tune beta, NOT the test set!
 # You don't want to leak test data into your hyperparameter choices.
-DATASET_NAME = 'xview'
-RUN_ID = 'run17'
+DATASET_NAME = 'xsub'
+RUN_ID = 'run18_official_v2'
 VAL_DIR = dataset_split_path(DATASET_NAME, 'val')
 BATCH_SIZE = 16
 NUM_CLASSES = dataset_num_classes(DATASET_NAME)
@@ -57,10 +58,10 @@ gcn_b = Spatial_GCN_Layer(in_channels=3, out_channels=128).to(device)
 transformer_b = Temporal_Brain_Layer(embed_dim=128, num_heads=4, max_frames=100, max_bodies=2).to(device)
 classifier_b = nn.Linear(128, NUM_CLASSES).to(device)
 
-joints_dir = checkpoint_directory(DATASET_NAME, RUN_ID, 'joints')
-gcn_b.load_state_dict(torch.load(joints_dir / 'best_gcn.pth', map_location=device, weights_only=True))
-transformer_b.load_state_dict(torch.load(joints_dir / 'best_transformer.pth', map_location=device, weights_only=True))
-classifier_b.load_state_dict(torch.load(joints_dir / 'best_classifier.pth', map_location=device, weights_only=True))
+bones_dir = checkpoint_directory(DATASET_NAME, RUN_ID, 'bones')
+gcn_b.load_state_dict(torch.load(bones_dir / 'best_gcn.pth', map_location=device, weights_only=True))
+transformer_b.load_state_dict(torch.load(bones_dir / 'best_transformer.pth', map_location=device, weights_only=True))
+classifier_b.load_state_dict(torch.load(bones_dir / 'best_classifier.pth', map_location=device, weights_only=True))
 global_node_b = transformer_b.global_node 
 
 gcn_b.eval()
@@ -74,11 +75,14 @@ all_probs_b = []
 
 loop = tqdm(val_dataloader, total=len(val_dataloader), leave=True, desc="Inferencing")
 with torch.no_grad():
-    for batch_idx, (batched_data, body_mask, labels) in enumerate(loop):
+    for batch_idx, (batched_data, body_mask, frame_mask, labels) in enumerate(loop):
         batched_data = batched_data.to(device)
         body_mask = body_mask.to(device)
+        frame_mask = frame_mask.to(device)
         labels = labels.to(device)
         all_labels.extend(labels.cpu().numpy())
+
+        # Every expert receives this exact shared batch, preserving sample identity.
 
         B, M, T, V, C = batched_data.shape
         
@@ -87,7 +91,7 @@ with torch.no_grad():
         feat_k = gcn_k(input_k)
         frames = feat_k.shape[1]
         t_input_k = torch.cat([feat_k, global_node_k.expand(B*M, frames, 1, 128)], dim=2)
-        vid_rep_k = transformer_k(t_input_k, B, M, body_mask=body_mask)
+        vid_rep_k = transformer_k(t_input_k, B, M, body_mask=body_mask, frame_mask=frame_mask)
         logits_k = classifier_k(vid_rep_k)
         probs_k = torch.softmax(logits_k, dim=1) 
         all_probs_k.append(probs_k.cpu().numpy())
@@ -97,7 +101,7 @@ with torch.no_grad():
         input_b = bone_data.reshape(B * M, T, V, 3)
         feat_b = gcn_b(input_b)
         t_input_b = torch.cat([feat_b, global_node_b.expand(B*M, frames, 1, 128)], dim=2)
-        vid_rep_b = transformer_b(t_input_b, B, M, body_mask=body_mask)
+        vid_rep_b = transformer_b(t_input_b, B, M, body_mask=body_mask, frame_mask=frame_mask)
         logits_b = classifier_b(vid_rep_b)
         probs_b = torch.softmax(logits_b, dim=1)
         all_probs_b.append(probs_b.cpu().numpy())
@@ -105,6 +109,8 @@ with torch.no_grad():
 all_probs_k = np.concatenate(all_probs_k, axis=0)
 all_probs_b = np.concatenate(all_probs_b, axis=0)
 all_labels = np.array(all_labels)
+if not (len(all_labels) == len(all_probs_k) == len(all_probs_b) == len(val_dataset)):
+    raise RuntimeError("Validation predictions are not aligned sample-for-sample")
 
 print("\n" + "=" * 50)
 print("🔍 GRID SEARCH: FINDING OPTIMAL ENSEMBLE WEIGHTS 🔍")
@@ -136,4 +142,12 @@ print(f"Best Beta: {best_beta:.2f}")
 print(f"Kinematic Stream Weight: {best_beta*100:.0f}%")
 print(f"Bone Stream Weight:      {(1-best_beta)*100:.0f}%")
 print(f"Projected Validation Accuracy: {best_acc:.2f}%")
+config_path = save_ensemble_config(
+    DATASET_NAME,
+    RUN_ID,
+    ["JBV", "B"],
+    {"JBV": float(best_beta), "B": float(1.0 - best_beta)},
+    best_acc,
+)
+print(f"Saved validation-selected ensemble config: {config_path}")
 print("=" * 50)
