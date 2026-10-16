@@ -24,7 +24,9 @@ OFFICIAL_COUNTS = {
     # The raw xsub120 test partition has 51,120 files before the 535 listed
     # bad-skeleton exclusions (201 of those are in the test partition).
     "xsub120": (114480, 51120),
-    "xset120": (114480, 60012),
+    # The raw xset120 test partition has 59,760 files before the listed
+    # bad-skeleton exclusions (283 of those are in the test partition).
+    "xset120": (114480, 59760),
 }
 NTU60_TRAIN_SUBJECTS = {
     1, 2, 4, 5, 8, 9, 13, 14, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38
