@@ -21,7 +21,9 @@ PROTOCOLS = ("xsub", "xview", "xsub120", "xset120")
 OFFICIAL_COUNTS = {
     "xsub": (56880, 16560),
     "xview": (56880, 18960),
-    "xsub120": (114480, 51454),
+    # The raw xsub120 test partition has 51,120 files before the 535 listed
+    # bad-skeleton exclusions (201 of those are in the test partition).
+    "xsub120": (114480, 51120),
     "xset120": (114480, 60012),
 }
 NTU60_TRAIN_SUBJECTS = {
