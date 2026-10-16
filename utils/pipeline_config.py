@@ -169,7 +169,8 @@ def ensemble_config_path(dataset_name: str, run_id: str) -> Path:
 
 
 def save_ensemble_config(dataset_name: str, run_id: str, composition: list[str],
-                         weights: Mapping[str, float], validation_accuracy: float) -> Path:
+                         weights: Mapping[str, float], validation_accuracy: float,
+                         best_by_stream_count: Mapping[str, Mapping] | None = None) -> Path:
     if not composition or set(composition) != set(weights):
         raise ValueError("Ensemble composition must match its weight keys.")
     if any(weight < 0 for weight in weights.values()) or abs(sum(weights.values()) - 1.0) > 1e-6:
@@ -187,6 +188,23 @@ def save_ensemble_config(dataset_name: str, run_id: str, composition: list[str],
         "validation_accuracy": float(validation_accuracy),
         "split_manifest_sha256": split_manifest_identifier(dataset_name),
     }
+    if best_by_stream_count is not None:
+        normalized = {}
+        for count, result in best_by_stream_count.items():
+            result_composition = list(result["composition"])
+            result_weights = {name: float(weight) for name, weight in result["weights"].items()}
+            if len(result_composition) != int(count) or set(result_composition) != set(result_weights):
+                raise ValueError(f"Invalid {count}-stream ensemble composition/weights")
+            if set(result_weights) - {"JBV", "B", "J", "V"}:
+                raise ValueError(f"Unknown stream in {count}-stream ensemble")
+            if any(weight < 0 for weight in result_weights.values()) or abs(sum(result_weights.values()) - 1.0) > 1e-6:
+                raise ValueError(f"Invalid weights for {count}-stream ensemble")
+            normalized[str(count)] = {
+                "composition": result_composition,
+                "weights": result_weights,
+                "validation_accuracy": float(result["validation_accuracy"]),
+            }
+        payload["best_by_stream_count"] = normalized
     temporary_path = config_path.with_suffix(".json.tmp")
     temporary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     temporary_path.replace(config_path)
@@ -207,6 +225,20 @@ def load_ensemble_config(dataset_name: str, run_id: str) -> dict:
         raise ValueError("Ensemble configuration must be selected on validation data")
     if config.get("split_manifest_sha256") != split_manifest_identifier(dataset_name):
         raise ValueError("Ensemble config was selected against a different split manifest")
+    if "best_by_stream_count" in config:
+        best_by_count = config["best_by_stream_count"]
+        if not best_by_count:
+            raise ValueError("Ensemble configuration has no per-size selections")
+        for count, result in best_by_count.items():
+            composition = result.get("composition", [])
+            weights = result.get("weights", {})
+            if len(composition) != int(count) or set(composition) != set(weights):
+                raise ValueError(f"Invalid {count}-stream composition and weights")
+            if not set(weights).issubset({"JBV", "B", "J", "V"}):
+                raise ValueError(f"Unknown stream in {count}-stream ensemble")
+            if any(float(weight) < 0 for weight in weights.values()) or abs(sum(map(float, weights.values())) - 1.0) > 1e-6:
+                raise ValueError(f"Invalid {count}-stream ensemble weights")
+        return config
     weights = config.get("weights", {})
     if not weights or set(config.get("composition", [])) != set(weights):
         raise ValueError("Ensemble configuration has inconsistent composition and weights")

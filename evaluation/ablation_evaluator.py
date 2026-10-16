@@ -1,4 +1,5 @@
 import os
+from itertools import combinations
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -18,7 +19,7 @@ from utils.pipeline_config import (
 
 # 1. HARDWARE & INIT
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-DATASET_NAME = 'xsub120'
+DATASET_NAME = 'xsub'
 RUN_ID = 'run18_official_v2'
 VAL_DIR = dataset_split_path(DATASET_NAME, 'val')
 BATCH_SIZE = 16
@@ -109,20 +110,19 @@ def find_optimal_fusion(model_names, step=0.05):
     best_weights = None
     num_models = len(model_names)
     
-    # Generate weight combinations that sum to 1.0
-    valid_weights = []
-    if num_models == 2:
-        for w1 in np.arange(0, 1.01, step):
-            valid_weights.append([w1, 1.0 - w1])
-    elif num_models == 3:
-        for w1 in np.arange(0, 1.01, step):
-            for w2 in np.arange(0, 1.01 - w1, step):
-                valid_weights.append([w1, w2, 1.0 - w1 - w2])
-    elif num_models == 4:
-        for w1 in np.arange(0, 1.01, step):
-            for w2 in np.arange(0, 1.01 - w1, step):
-                for w3 in np.arange(0, 1.01 - w1 - w2, step):
-                    valid_weights.append([w1, w2, w3, 1.0 - w1 - w2 - w3])
+    # Require each stream to have a positive weight so categories are distinct.
+    units = round(1.0 / step)
+
+    def positive_partitions(parts, remaining):
+        if parts == 1:
+            if remaining > 0:
+                yield [remaining / units]
+            return
+        for first in range(1, remaining - parts + 2):
+            for rest in positive_partitions(parts - 1, remaining - first):
+                yield [first / units, *rest]
+
+    valid_weights = list(positive_partitions(num_models, units))
 
     for weights in valid_weights:
         # Multiply each brain's probability by its weight and sum them
@@ -150,14 +150,29 @@ print("🏆 REAT MASTER ABLATION FUSION RESULTS 🏆")
 print("=" * 60)
 
 best_overall = None
+best_by_stream_count = {}
 
 
 def report_candidate(model_names):
     global best_overall
     accuracy, weights = find_optimal_fusion(model_names)
+    count = str(len(model_names))
+    current = best_by_stream_count.get(count)
+    if current is None or accuracy > current["validation_accuracy"]:
+        best_by_stream_count[count] = {
+            "composition": list(model_names),
+            "weights": weights,
+            "validation_accuracy": float(accuracy),
+        }
     if best_overall is None or accuracy > best_overall["accuracy"]:
         best_overall = {"accuracy": accuracy, "composition": model_names, "weights": weights}
 
+
+print("\n--- Pure (1-Stream) Models ---")
+report_candidate(['JBV'])
+report_candidate(['B'])
+report_candidate(['J'])
+report_candidate(['V'])
 
 print("\n--- 2-Stream Fusions ---")
 report_candidate(['JBV', 'J'])
@@ -183,6 +198,7 @@ config_path = save_ensemble_config(
     best_overall["composition"],
     best_overall["weights"],
     best_overall["accuracy"],
+    best_by_stream_count=best_by_stream_count,
 )
 print(f"Best validation composition: {best_overall['composition']}")
 print(f"Saved validation-selected ensemble config: {config_path}")
